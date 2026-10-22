@@ -146,7 +146,7 @@ impl Debug for FailingStartStrategy {
 
 impl DataActor for FailingStartStrategy {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        self.subscribe_quotes("ETHUSDT-PERP.BINANCE".into(), None, None);
+        self.subscribe_quotes(InstrumentId::from("ETHUSDT-PERP.BINANCE"), None, None);
         anyhow::ensure!(
             !nautilus_common::runner::data_cmd_queue_is_empty(),
             "Expected startup subscription to remain queued",
@@ -5831,7 +5831,7 @@ fn test_instruments_with_same_expiration_share_expiry_timer() {
 }
 
 #[rstest]
-fn test_instrument_update_cancels_previous_expiry_timer() {
+fn test_add_instrument_with_changed_expiration_is_rejected() {
     let venue = Venue::from("OPRA");
     let original_expiration_ns = UnixNanos::from(2_000_000_000u64);
     let updated_expiration_ns = UnixNanos::from(3_000_000_000u64);
@@ -5854,8 +5854,16 @@ fn test_instrument_update_cancels_previous_expiry_timer() {
     let updated_option = option_contract(venue, updated_expiration_ns);
 
     engine.add_instrument(&option).unwrap();
-    engine.add_instrument(&updated_option).unwrap();
+    let result = engine.add_instrument(&updated_option);
+    engine.add_instrument(&option).unwrap();
 
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        format!(
+            "Instrument {} is already registered with a different definition",
+            option.id()
+        )
+    );
     let expiry_timer_names: Vec<String> = engine
         .kernel()
         .clock
@@ -5865,13 +5873,20 @@ fn test_instrument_update_cancels_previous_expiry_timer() {
         .filter(|name| name.starts_with("INSTRUMENT-EXPIRATION:"))
         .map(ToString::to_string)
         .collect();
-
     assert_eq!(
         expiry_timer_names,
         vec![format!(
-            "INSTRUMENT-EXPIRATION:{venue}:{updated_expiration_ns}"
+            "INSTRUMENT-EXPIRATION:{venue}:{original_expiration_ns}"
         )],
     );
+    let cached_expiration_ns = engine
+        .kernel()
+        .cache
+        .borrow()
+        .instrument(&option.id())
+        .unwrap()
+        .expiration_ns();
+    assert_eq!(cached_expiration_ns, Some(original_expiration_ns));
 }
 
 fn run_call_option_expiry_timer(
