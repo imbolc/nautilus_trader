@@ -9,6 +9,8 @@ Released on TBD (UTC).
 - Added exact `Money` round trips through JSON, MessagePack, Arrow, PostgreSQL, and Python balance dictionaries
 - Added accumulation of fractional `Money` commissions beyond currency precision
 - Added Binance Spot SBE list-status decoding with child acceptance and rejection
+- Added Derive explicit WebSocket cancel-on-disconnect control
+- Added Derive execution-client cancel-on-disconnect configuration for resting limit orders
 - Added Hyperliquid instrument status subscriptions through metadata polling (#5346), thanks @dxwil
 - Added Interactive Brokers optional account base currency (#5322), thanks @chaneyka1
 - Added proactive Lighter WebSocket reconnects on venue `shutdown` notices
@@ -90,6 +92,7 @@ Released on TBD (UTC).
 - Fixed risk denials for released orders and cleanup of their contingent orders
 - Fixed simulated venues matching cross-instrument OTO children with their parent's market and execution state
 - Fixed Python isolation checks failing with inherited `PYTHONHOME`
+- Fixed non-ASCII signal topics to use Unicode titlecase mappings
 - Fixed unbounded memory growth in `SubscriptionState` from unknown WebSocket subscription acknowledgments
 - Fixed `RetryManager` skipping minimum retry delays after operation timeouts (#5406), thanks @imbolc
 - Fixed Architect AX handler stalls during book writes and uncanceled queued book replacements
@@ -164,8 +167,10 @@ Released on TBD (UTC).
 
 ### Internal Improvements
 
+- Added deferred finalization for live execution report collection
 - Improved Dockerfile linting to run Hadolint without Docker
 - Optimized JSON and MessagePack decoding and custom data response encoding
+- Optimized virtual hedging fill-history checks during execution and reconciliation
 - Standardized Architect AX owned execution report tasks
 - Optimized Polymarket instrument caching during bootstrap and refresh (#5373), thanks @imbolc
 - Upgraded `cargo-codspeed` tool to v5.0.3
