@@ -1591,6 +1591,8 @@ impl LiveNode {
             .as_ref()
             .map(|config| QueueMonitor::new(config, metrics.snapshot()));
         let mut dispatches_since_yield = 0usize;
+        let mut skip_time = false;
+        let mut skip_data = false;
 
         let dispatch_result = loop {
             let callbacks_pending = match drain_callbacks().await {
@@ -1611,6 +1613,9 @@ impl LiveNode {
             let shutdown_deadline = self.shutdown_deadline;
             let is_shutting_down = self.state() == NodeState::ShuttingDown;
             let is_running = self.state() == NodeState::Running;
+            let commands_empty = data_cmd_rx.is_empty();
+            let poll_time = !skip_time || (data_evt_rx.is_empty() && commands_empty);
+            let poll_data = !skip_data || commands_empty;
 
             tokio::select! {
                 biased;
@@ -1851,7 +1856,8 @@ impl LiveNode {
                 // ordered ahead of data events so a strategy action (cancel,
                 // submit, etc.) is not delayed behind a market data backlog
                 // when the biased select polls receivers each iteration.
-                Some(handler) = time_evt_rx.recv() => {
+                Some(handler) = time_evt_rx.recv(), if poll_time => {
+                    skip_time = true;
                     let dispatch_start = dst::time::Instant::now();
                     let dispatched = AsyncRunner::handle_time_event(handler);
 
@@ -1870,6 +1876,8 @@ impl LiveNode {
                     }
                 }
                 Some(event) = system_evt_rx.recv() => {
+                    skip_time = false;
+
                     if is_shutting_down {
                         log::debug!("Residual system event: {event}");
                         residual_events += 1;
@@ -1877,6 +1885,8 @@ impl LiveNode {
                     event.dispatch(|event| self.process_system_event(event));
                 }
                 Some(command) = system_cmd_rx.recv() => {
+                    skip_time = false;
+
                     if is_shutting_down {
                         log::debug!("Residual system command: {command}");
                         residual_events += 1;
@@ -1884,6 +1894,7 @@ impl LiveNode {
                     command.dispatch(|command| self.process_system_command(command));
                 }
                 Some(evt) = exec_evt_rx.recv() => {
+                    skip_time = false;
                     let dispatch_start = dst::time::Instant::now();
 
                     if is_shutting_down {
@@ -1900,6 +1911,7 @@ impl LiveNode {
                     );
                 }
                 Some(cmd) = exec_cmd_rx.recv() => {
+                    skip_time = false;
                     let dispatch_start = dst::time::Instant::now();
 
                     if is_shutting_down {
@@ -1916,6 +1928,7 @@ impl LiveNode {
                     );
                 }
                 message = recv_external_msgbus_message(&mut external_msgbus_rx, &mut pending_external) => {
+                    skip_time = false;
                     let external_msgbus_start = dst::time::Instant::now();
 
                     match message {
@@ -1939,7 +1952,9 @@ impl LiveNode {
                         metrics_start,
                     );
                 }
-                Some(evt) = data_evt_rx.recv() => {
+                Some(evt) = data_evt_rx.recv(), if poll_data => {
+                    skip_time = false;
+                    skip_data = true;
                     let dispatch_start = dst::time::Instant::now();
 
                     if is_shutting_down {
@@ -1955,6 +1970,8 @@ impl LiveNode {
                     );
                 }
                 Some(cmd) = data_cmd_rx.recv() => {
+                    skip_time = false;
+                    skip_data = false;
                     let dispatch_start = dst::time::Instant::now();
 
                     if is_shutting_down {
@@ -4631,6 +4648,66 @@ mod tests {
         assert_eq!(events[0].ts_init, events[0].ts_event);
         drop(events);
         msgbus::get_message_bus().borrow_mut().dispose();
+    }
+
+    #[rstest]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_run_dispatch_progress_under_load(
+        #[values(false, true)] execution: bool,
+        #[values(false, true)] slow: bool,
+    ) {
+        let config = LiveNodeConfig {
+            delay_post_stop: Duration::ZERO,
+            ..Default::default()
+        };
+        let mut node = LiveNode::build("FairDispatchNode".to_string(), Some(config)).unwrap();
+        let handle = node.handle();
+        let stop = handle.clone();
+        let callback = TimeEventCallback::RustLocal(Rc::new(move |event| {
+            if slow {
+                // Make housekeeping ready after each timer callback
+                std::thread::sleep(Duration::from_millis(110));
+            }
+
+            if event.ts_init == UnixNanos::from(8) {
+                // Check progress before shutdown can drain the queues
+                let snapshot = stop.metrics_snapshot();
+                assert_eq!(snapshot.time_events.dispatched, 7);
+
+                if execution {
+                    assert!((1..16).contains(&snapshot.exec_events.dispatched));
+                    assert_eq!(snapshot.data_events.dispatched, 0);
+                } else {
+                    assert!(snapshot.data_events.dispatched > 0);
+                    assert_eq!(snapshot.data_commands.dispatched, 1);
+                }
+                stop.stop();
+            }
+        }));
+
+        let drive = async {
+            wait_until_async(|| async { handle.is_running() }, Duration::from_secs(2)).await;
+
+            for ts in (1..=16_u64).map(UnixNanos::from) {
+                nautilus_common::runner::get_time_event_sender().send(TimeEventMessage::new(
+                    TimeEvent::new("fairness".into(), UUID4::new(), ts, ts),
+                    callback.clone(),
+                ));
+                get_data_event_sender().send(stub_data_event()).unwrap();
+
+                if execution {
+                    get_exec_event_sender().send(stub_exec_event()).unwrap();
+                }
+            }
+            nautilus_common::runner::get_data_cmd_sender().execute(stub_data_command());
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (result, ()) = tokio::join!(node.run(), drive);
+            result.unwrap();
+        })
+        .await
+        .unwrap();
+        assert!(handle.should_stop());
     }
 
     #[rstest]
