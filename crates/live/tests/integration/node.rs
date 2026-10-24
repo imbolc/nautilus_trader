@@ -94,6 +94,7 @@ use proptest::{
 };
 use rstest::rstest;
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 
 #[derive(Debug)]
 struct TestActor {
@@ -357,6 +358,8 @@ pub(crate) mod serial_tests {
 
     #[cfg(not(madsim))]
     mod reconciliation_bench;
+
+    mod report_acceptance;
 
     #[derive(Clone, Debug, Default)]
     struct StartupMassStatusClientState {
@@ -1114,6 +1117,9 @@ pub(crate) mod serial_tests {
         position_report_count: Arc<AtomicUsize>,
         instrument_received: Arc<AtomicBool>,
         report_response_returned: Arc<AtomicBool>,
+        order_report_finish_ns: Arc<AtomicU64>,
+        order_report_finish_busy_ns: Arc<AtomicU64>,
+        order_reports_finalized: Arc<Mutex<Vec<ClientOrderId>>>,
     }
 
     struct BlockingReportExecutionClient {
@@ -1563,6 +1569,7 @@ pub(crate) mod serial_tests {
             let report_release_once = self.report_release_once;
             let order_reports_complete = self.order_reports_complete;
             let order_reports = self.order_reports.clone();
+            let finish_state = self.state.clone();
 
             ExecutionReportTask::new(
                 async move {
@@ -1603,7 +1610,24 @@ pub(crate) mod serial_tests {
                         std::future::pending::<anyhow::Result<Vec<OrderStatusReport>>>().await
                     }
                 },
-                Ok,
+                move |reports| {
+                    let started = std::time::Instant::now();
+                    let delay = Duration::from_nanos(
+                        finish_state.order_report_finish_ns.load(Ordering::Relaxed),
+                    );
+                    #[cfg(all(feature = "simulation", madsim))]
+                    madsim::time::advance(delay);
+                    #[cfg(not(all(feature = "simulation", madsim)))]
+                    std::thread::sleep(delay);
+                    finish_state
+                        .order_reports_finalized
+                        .lock()
+                        .extend(reports.iter().filter_map(|report| report.client_order_id));
+                    finish_state
+                        .order_report_finish_busy_ns
+                        .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    Ok(reports)
+                },
             )
         }
 
@@ -3423,7 +3447,7 @@ pub(crate) mod serial_tests {
                 cache.positions_open(None, Some(&instrument_id), None, Some(&account_id), None);
             assert_eq!(positions.len(), 1);
             assert_eq!(positions[0].signed_decimal_qty(), Decimal::from(5));
-            assert_eq!(positions[0].avg_px_open, 3000.0);
+            assert_eq!(positions[0].avg_px_open, dec!(3000.0));
         } else {
             result.unwrap();
             assert_eq!(quantity_on_start.get(), Some(Decimal::ZERO));
