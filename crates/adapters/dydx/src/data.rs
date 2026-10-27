@@ -330,7 +330,7 @@ impl DydxDataClient {
         for instrument in &instruments {
             if let Err(e) = self
                 .data_sender
-                .send(DataEvent::Instrument(instrument.clone()))
+                .send(DataEvent::Data(instrument.clone().into()))
             {
                 log::warn!("Failed to publish instrument {}: {e}", instrument.id());
             }
@@ -505,7 +505,7 @@ impl DataClient for DydxDataClient {
             if let Some(instrument) = self.instrument_cache.get(&instrument_id) {
                 log::debug!("Sending cached instrument for {instrument_id}");
 
-                if let Err(e) = self.data_sender.send(DataEvent::Instrument(instrument)) {
+                if let Err(e) = self.data_sender.send(DataEvent::Data(instrument.into())) {
                     log::warn!("Failed to send instrument {instrument_id}: {e}");
                 }
             } else {
@@ -651,7 +651,9 @@ impl DataClient for DydxDataClient {
 
             // Replay last known status (initial snapshot arrives before subscription)
             if let Some(status) = self.last_instrument_statuses.get(&instrument_id)
-                && let Err(e) = self.data_sender.send(DataEvent::InstrumentStatus(*status))
+                && let Err(e) = self
+                    .data_sender
+                    .send(DataEvent::Data(NautilusData::InstrumentStatus(*status)))
             {
                 log::error!("Failed to replay instrument status for {instrument_id}: {e}");
             }
@@ -791,24 +793,23 @@ impl DataClient for DydxDataClient {
     }
 
     fn request_instrument(&self, request: RequestInstrument) -> anyhow::Result<()> {
+        let instrument_id = request.single_instrument_id()?;
+
         if request.start.is_some() {
             log::warn!(
-                "Requesting instrument {} with specified `start` which has no effect",
-                request.instrument_id
+                "Requesting instrument {instrument_id} with specified `start` which has no effect"
             );
         }
 
         if request.end.is_some() {
             log::warn!(
-                "Requesting instrument {} with specified `end` which has no effect",
-                request.instrument_id
+                "Requesting instrument {instrument_id} with specified `end` which has no effect"
             );
         }
 
         let instrument_cache = self.instrument_cache.clone();
         let sender = self.data_sender.clone();
         let http = self.http_client.clone();
-        let instrument_id = request.instrument_id;
         let request_id = request.request_id;
         let client_id = request.client_id.unwrap_or(self.client_id);
         let start = request.start;
@@ -918,16 +919,16 @@ impl DataClient for DydxDataClient {
     }
 
     fn request_book_snapshot(&self, request: RequestBookSnapshot) -> anyhow::Result<()> {
+        let instrument_id = request.single_instrument_id()?;
+
         if request.depth.is_some() {
             log::warn!(
-                "Requesting book snapshot for {} with specified `depth` which has no effect",
-                request.instrument_id
+                "Requesting book snapshot for {instrument_id} with specified `depth` which has no effect"
             );
         }
 
         let http_client = self.http_client.clone();
         let sender = self.data_sender.clone();
-        let instrument_id = request.instrument_id;
         let request_id = request.request_id;
         let client_id = request.client_id.unwrap_or(self.client_id);
         let params = request.params;
@@ -968,9 +969,10 @@ impl DataClient for DydxDataClient {
     }
 
     fn request_trades(&self, request: RequestTrades) -> anyhow::Result<()> {
+        let instrument_id = request.single_instrument_id()?;
+
         let http_client = self.http_client.clone();
         let sender = self.data_sender.clone();
-        let instrument_id = request.instrument_id;
         let start = request.start;
         let end = request.end;
         let limit = request.limit.map(|n| n.get() as u32);
@@ -1028,9 +1030,10 @@ impl DataClient for DydxDataClient {
     }
 
     fn request_bars(&self, request: RequestBars) -> anyhow::Result<()> {
+        let bar_type = request.single_bar_type()?;
+
         let http_client = self.http_client.clone();
         let sender = self.data_sender.clone();
-        let bar_type = request.bar_type;
         let start = request.start;
         let end = request.end;
         let limit = request.limit.map(|n| n.get() as u32);
@@ -1088,9 +1091,10 @@ impl DataClient for DydxDataClient {
     }
 
     fn request_funding_rates(&self, request: RequestFundingRates) -> anyhow::Result<()> {
+        let instrument_id = request.single_instrument_id()?;
+
         let http_client = self.http_client.clone();
         let sender = self.data_sender.clone();
-        let instrument_id = request.instrument_id;
         let start = request.start;
         let end = request.end;
         let limit = request.limit.map(|n| n.get() as u32);
@@ -1498,9 +1502,11 @@ impl DydxDataClient {
                         .insert(instrument_id, instrument_status);
 
                     if ctx.active_instrument_status_subs.contains(&instrument_id)
-                        && let Err(e) = ctx
-                            .data_sender
-                            .send(DataEvent::InstrumentStatus(instrument_status))
+                        && let Err(e) =
+                            ctx.data_sender
+                                .send(DataEvent::Data(NautilusData::InstrumentStatus(
+                                    instrument_status,
+                                )))
                     {
                         log::error!("Failed to emit instrument status for {instrument_id}: {e}");
                     }
@@ -1534,7 +1540,10 @@ impl DydxDataClient {
                             ts_init,
                         };
 
-                        if let Err(e) = ctx.data_sender.send(DataEvent::FundingRate(funding_rate)) {
+                        if let Err(e) = ctx
+                            .data_sender
+                            .send(DataEvent::Data(NautilusData::FundingRate(funding_rate)))
+                        {
                             log::error!("Failed to emit funding rate for {instrument_id}: {e}");
                         }
                     }
@@ -1595,7 +1604,7 @@ impl DydxDataClient {
             match http_client.fetch_and_cache_single_instrument(&ticker).await {
                 Ok(Some(instrument)) => {
                     ws_client.cache_instrument(instrument.clone());
-                    if let Err(e) = data_sender.send(DataEvent::Instrument(instrument)) {
+                    if let Err(e) = data_sender.send(DataEvent::Data(instrument.into())) {
                         log::error!("Failed to emit new instrument: {e}");
                     }
                     log::debug!("Fetched and cached new instrument: {ticker}");

@@ -51,7 +51,7 @@ members = [
 [workspace.package]
 version = "0.67.0"
 edition = "2024"
-rust-version = "1.99.0"
+rust-version = "1.99.1"
 authors = ["Nautech Systems <info@nautechsystems.io>"]
 license = "LGPL-3.0-only"
 categories = ["finance", "simulation", "asynchronous"]
@@ -155,6 +155,7 @@ derive_builder = { version = "0.20.2", default-features = false, features = [
 dotenvy = "0.15.7"
 ed25519-dalek = "3.0.0"
 enum_dispatch = "0.3.13"
+flate2 = "1.1.10"
 futures = { version = "0.3.34", default-features = false, features = [
   "std",
   "async-await",
@@ -203,7 +204,7 @@ mimalloc = "0.1.52"
 object_store = { version = "0.13.2", default-features = false, features = [
   "fs",
 ] }
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 parquet = { version = "59.3.1", default-features = false, features = [
   "arrow",
   "arrow_canonical_extension_types",
@@ -234,7 +235,7 @@ rand = { version = "0.10.3", default-features = false, features = [
   "thread_rng",
 ] }
 redb = { version = "4.4.0", default-features = false }
-redis = { version = "1.7.1", default-features = false, features = [
+redis = { version = "1.8.0", default-features = false, features = [
   "connection-manager",
   "sentinel",
   "streams",
@@ -249,7 +250,7 @@ regex = { version = "1.13.1", default-features = false, features = [
   "unicode-perl",
 ] }
 rmp-serde = "1.3.1"
-ruint = { version = "1.20.1", default-features = false }
+ruint = { version = "1.21.1", default-features = false }
 rust_decimal = { version = "1.43.0", features = ["serde-with-float"] }
 rust_decimal_macros = "1.40.0"
 rustls = { version = "0.23.46", default-features = false, features = [
@@ -269,7 +270,7 @@ serde_json = { version = "1.0.154", default-features = false, features = [
   "std",
 ] }
 serde_urlencoded = "0.7.1"
-smallvec = { version = "1.16.3", features = ["serde"] }
+smallvec = { version = "1.16.4", features = ["serde"] }
 socket2 = { version = "0.6.5", features = ["all"] }
 sockudo-ws = { version = "3.1.0", default-features = false, features = [
   "simd",
@@ -290,7 +291,7 @@ sysinfo = { version = "0.39.6", default-features = false, features = [
 ] }
 tabled = { version = "0.22.0", default-features = false, features = ["std"] }
 thiserror = "2.0.21"
-tokio = { version = "1.53.3", default-features = false, features = [
+tokio = { version = "1.54.1", default-features = false, features = [
   "parking_lot",
   "rt-multi-thread",
   "sync",
@@ -323,8 +324,8 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 ] }
 url = { version = "2.5.8", default-features = false }
 ustr = { version = "1.1.0", features = ["serde"] }
-uuid = { version = "1.28.0", features = ["v4", "serde"] }
-webpki-roots = "1.0.10"
+uuid = { version = "1.29.0", features = ["v4", "serde"] }
+webpki-roots = "1.0.11"
 zeroize = { version = "1.9.1", features = ["alloc", "zeroize_derive"] }
 
 # -----------------------------------------------------------------------------
@@ -341,7 +342,6 @@ csv = "1.4.0"
 databento = { version = "0.63.0" }
 dydx-proto = { version = "0.4.0", default-features = false }
 fallible-streaming-iterator = "0.1.9"
-flate2 = "1.1.10"
 hypersync-client = { version = "1.4.1" }
 ibapi = "=5.0.0"
 ryu = "1.0.23"
@@ -371,6 +371,7 @@ axum = { version = "0.8.9", default-features = false, features = [
 criterion = { package = "codspeed-criterion-compat", version = "5.0.3", default-features = false, features = [
   "cargo_bench_support",
 ] }
+cucumber = "0.23.0"
 iai = "0.1.1"
 pretty_assertions = "1.4.1"
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
@@ -411,9 +412,6 @@ store = { path = '.supply-chain' }
 [workspace.metadata.cooldown]
 days = 3
 trusted-base = "origin/develop"
-
-[workspace.metadata.cooldown.allow]
-ctutils = "0.4.4"
 
 # -----------------------------------------------------------------------------
 # Profiles
@@ -705,7 +703,8 @@ if_let_mutex = "warn"
 # assertions_on_result_states = "warn"
 # map_err_ignore = "warn"
 
-# Explicitly allowed (opinionated lints we disagree with)
+# Shared allowances, also generated after source pedantic opt-ins by
+# scripts/update-clippy-allowances.py because attributes override Cargo flags.
 redundant_else = "allow" # Sometimes explicit else blocks improve readability
 single_match_else = "allow" # Match can be clearer than if-let-else for some patterns
 manual_let_else = "allow" # Match can be clearer than let-else for some patterns

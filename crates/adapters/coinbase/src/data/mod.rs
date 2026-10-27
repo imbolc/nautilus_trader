@@ -383,7 +383,9 @@ fn dispatch_ws_message(
             // Coinbase publishes status for every product on a single feed,
             // so filter to currently-subscribed instruments before emitting.
             let subscribed = status_subs.lock().contains(&status.instrument_id);
-            if subscribed && let Err(e) = data_sender.send(DataEvent::InstrumentStatus(*status)) {
+            if subscribed
+                && let Err(e) = data_sender.send(DataEvent::Data(Data::InstrumentStatus(*status)))
+            {
                 log::error!("Failed to send instrument status: {e}");
             }
         }
@@ -478,7 +480,7 @@ impl DataClient for CoinbaseDataClient {
                 .context("failed to bootstrap instruments")?;
 
             for instrument in instruments {
-                if let Err(e) = self.data_sender.send(DataEvent::Instrument(instrument)) {
+                if let Err(e) = self.data_sender.send(DataEvent::Data(instrument.into())) {
                     log::warn!("Failed to send instrument: {e}");
                 }
             }
@@ -528,7 +530,7 @@ impl DataClient for CoinbaseDataClient {
             if let Some(instrument) = instruments.get(&instrument_id) {
                 if let Err(e) = self
                     .data_sender
-                    .send(DataEvent::Instrument(instrument.clone()))
+                    .send(DataEvent::Data(instrument.clone().into()))
                 {
                     log::error!("Failed to send instrument {instrument_id}: {e}");
                 }
@@ -890,13 +892,14 @@ impl DataClient for CoinbaseDataClient {
     }
 
     fn request_instrument(&self, request: RequestInstrument) -> anyhow::Result<()> {
-        log::debug!("Requesting instrument: {}", request.instrument_id);
+        let instrument_id = request.single_instrument_id()?;
+
+        log::debug!("Requesting instrument: {instrument_id}");
 
         let provider = self.provider.clone();
         let sender = self.data_sender.clone();
         let instruments_cache = self.instruments.clone();
         let ws = self.ws_client.clone();
-        let instrument_id = request.instrument_id;
         let product_id = instrument_id.symbol.to_string();
         let request_id = request.request_id;
         let client_id = request.client_id.unwrap_or(self.client_id);
@@ -938,7 +941,8 @@ impl DataClient for CoinbaseDataClient {
     }
 
     fn request_book_snapshot(&self, request: RequestBookSnapshot) -> anyhow::Result<()> {
-        let instrument_id = request.instrument_id;
+        let instrument_id = request.single_instrument_id()?;
+
         let product_id = instrument_id.symbol.to_string();
 
         let instruments = self.instruments.load();
@@ -1022,9 +1026,9 @@ impl DataClient for CoinbaseDataClient {
     }
 
     fn request_trades(&self, request: RequestTrades) -> anyhow::Result<()> {
-        log::debug!("Requesting trades for {}", request.instrument_id);
+        let instrument_id = request.single_instrument_id()?;
 
-        let instrument_id = request.instrument_id;
+        log::debug!("Requesting trades for {instrument_id}");
         let product_id = instrument_id.symbol.to_string();
 
         let instruments = self.instruments.load();
@@ -1098,9 +1102,9 @@ impl DataClient for CoinbaseDataClient {
     }
 
     fn request_bars(&self, request: RequestBars) -> anyhow::Result<()> {
-        log::debug!("Requesting bars for {}", request.bar_type);
+        let bar_type = request.single_bar_type()?;
 
-        let bar_type = request.bar_type;
+        log::debug!("Requesting bars for {bar_type}");
         let granularity = bar_type_to_granularity(&bar_type)?;
         let instrument_id = bar_type.instrument_id();
         let product_id = instrument_id.symbol.to_string();
@@ -1282,10 +1286,10 @@ mod tests {
         dispatch_ws_message(make_status_event(instrument_id), &tx.into(), &subs);
 
         match rx.try_recv() {
-            Ok(DataEvent::InstrumentStatus(status)) => {
+            Ok(DataEvent::Data(Data::InstrumentStatus(status))) => {
                 assert_eq!(status.instrument_id, instrument_id);
             }
-            other => panic!("expected DataEvent::InstrumentStatus, was {other:?}"),
+            other => panic!("expected DataEvent::Data(Data::InstrumentStatus(...)), was {other:?}"),
         }
     }
 

@@ -556,6 +556,10 @@
       "published": "2024-03-19T12:50:23.529199Z",
       "verified_at": "2026-09-13T06:09:27Z"
     },
+    "bstr@1.13.1": {
+      "published": "2026-08-10T11:12:08.883439Z",
+      "verified_at": "2026-10-25T07:20:59Z"
+    },
     "bumpalo@3.20.3": {
       "published": "2026-05-22T14:59:11.132139Z",
       "verified_at": "2026-09-13T06:09:27Z"
@@ -592,9 +596,9 @@
       "published": "2021-09-04T11:07:33.449935Z",
       "verified_at": "2026-09-13T06:09:27Z"
     },
-    "cc@1.8.0": {
-      "published": "2026-10-11T14:17:35.305208Z",
-      "verified_at": "2026-10-15T21:32:23Z"
+    "cc@1.10.0": {
+      "published": "2026-10-23T08:35:43.203664Z",
+      "verified_at": "2026-10-26T21:43:39Z"
     },
     "cfg-if@1.0.5": {
       "published": "2026-09-16T17:36:11.278420Z",
@@ -692,6 +696,10 @@
       "published": "2024-04-26T14:26:18.816602Z",
       "verified_at": "2026-09-13T06:09:27Z"
     },
+    "console@0.16.6": {
+      "published": "2026-09-10T07:42:27.489839Z",
+      "verified_at": "2026-10-25T07:20:59Z"
+    },
     "const-hex@1.19.3": {
       "published": "2026-09-16T22:07:44.344471Z",
       "verified_at": "2026-09-19T22:29:50Z"
@@ -712,13 +720,13 @@
       "published": "2024-03-03T23:32:56.450219Z",
       "verified_at": "2026-09-13T06:09:27Z"
     },
-    "const_format@0.2.36": {
-      "published": "2026-04-17T06:16:19.071058Z",
-      "verified_at": "2026-09-13T06:09:27Z"
+    "const_format@0.2.37": {
+      "published": "2026-10-23T18:24:55.077008Z",
+      "verified_at": "2026-10-26T21:43:39Z"
     },
-    "const_format_proc_macros@0.2.34": {
-      "published": "2024-12-06T21:09:55.439685Z",
-      "verified_at": "2026-09-13T06:09:27Z"
+    "const_format_proc_macros@0.2.37": {
+      "published": "2026-10-23T18:24:44.328084Z",
+      "verified_at": "2026-10-26T21:43:39Z"
     },
     "constant_time_eq@0.4.2": {
       "published": "2025-03-15T17:03:47.885264Z",
@@ -816,9 +824,21 @@
       "published": "2025-10-17T13:56:07.013801Z",
       "verified_at": "2026-09-13T06:09:27Z"
     },
-    "ctutils@0.4.4": {
-      "published": "2026-10-23T01:04:28.877964Z",
-      "verified_at": "2026-10-23T10:44:51Z"
+    "ctutils@0.4.5": {
+      "published": "2026-10-23T04:02:07.737826Z",
+      "verified_at": "2026-10-26T21:51:36Z"
+    },
+    "cucumber-codegen@0.23.0": {
+      "published": "2026-04-23T22:34:41.042099Z",
+      "verified_at": "2026-10-25T07:20:59Z"
+    },
+    "cucumber-expressions@0.5.0": {
+      "published": "2025-12-12T14:00:38.300524Z",
+      "verified_at": "2026-10-25T07:20:59Z"
+    },
+    "cucumber@0.23.0": {
+      "published": "2026-04-23T22:35:03.179719Z",
+      "verified_at": "2026-10-25T07:20:59Z"
     },
     "curve25519-dalek-derive@0.1.1": {
       "published": "2023-10-31T17:58:09.620431Z",
@@ -1156,6 +1176,10 @@
       "published": "2025-10-01T10:36:11.222774Z",
       "verified_at": "2026-09-13T06:09:27Z"
     },
+    "encode_unicode@1.0.0": {
+      "published": "2022-08-07T14:19:49.238999Z",
+      "verified_at": "2026-10-25T07:20:59Z"
+    },
     "enum-ordinalize-derive@4.4.2": {
       "published": "2026-08-01T03:09:18.297565Z",
       "verified_at": "2026-09-13T06:09:27Z"
@@ -1352,9 +1376,21 @@
       "published": "2026-06-17T18:01:59.979552Z",
       "verified_at": "2026-09-13T06:09:27Z"
     },
+    "gherkin@0.16.0": {
+      "published": "2026-04-23T21:00:40.911829Z",
+      "verified_at": "2026-10-25T07:20:59Z"
+    },
     "glob@0.3.4": {
       "published": "2026-07-21T14:53:49.688341Z",
       "verified_at": "2026-09-13T06:09:27Z"
+    },
+    "globset@0.4.20": {
+      "published": "2026-08-04T13:59:29.810360Z",
+      "verified_at": "2026-10-25T07:20:59Z"
+    },
+    "globwalk@0.9.1": {
+      "published": "2024-01-06T20:53:34.390377Z",
+      "verified_at": "2026-10-25T07:20:59Z"
     },
     "group@0.13.0": {
       "published": "2022-12-06T02:02:57.906653Z",
@@ -1508,33 +1544,49 @@
       "published": "2026-10-04T23:16:47.621967Z",
       "verified_at": "2026-10-05T06:55:41Z"
     },
-    "icu_collections@2.3.0": {
-      "published": "2026-08-13T23:28:40.279341Z",
-      "verified_at": "2026-09-13T06:09:27Z"
+    "icu_collections@2.4.0": {
+      "published": "2026-10-22T08:56:10.314911Z",
+      "verified_at": "2026-10-26T21:43:39Z"
     },
-    "icu_locale_core@2.3.0": {
-      "published": "2026-08-13T23:28:12.641726Z",
-      "verified_at": "2026-09-13T06:09:27Z"
+    "icu_locale_core@2.4.0": {
+      "published": "2026-10-22T08:51:54.513231Z",
+      "verified_at": "2026-10-26T21:43:39Z"
     },
-    "icu_normalizer@2.3.0": {
-      "published": "2026-08-13T23:28:56.931089Z",
-      "verified_at": "2026-09-13T06:09:27Z"
+    "icu_locale_fallback@2.4.0": {
+      "published": "2026-10-22T08:55:50.432938Z",
+      "verified_at": "2026-10-26T21:43:39Z"
     },
-    "icu_normalizer_data@2.3.0": {
-      "published": "2026-08-13T23:28:53.835366Z",
-      "verified_at": "2026-09-13T06:09:27Z"
+    "icu_locale_fallback_data@2.4.0": {
+      "published": "2026-10-22T08:55:42.310626Z",
+      "verified_at": "2026-10-26T21:43:39Z"
     },
-    "icu_properties@2.3.0": {
-      "published": "2026-08-13T23:28:46.255153Z",
-      "verified_at": "2026-09-13T06:09:27Z"
+    "icu_normalizer@2.4.0": {
+      "published": "2026-10-22T08:56:44.926074Z",
+      "verified_at": "2026-10-26T21:43:39Z"
     },
-    "icu_properties_data@2.3.0": {
-      "published": "2026-08-13T23:28:42.576523Z",
-      "verified_at": "2026-09-13T06:09:27Z"
+    "icu_normalizer_data@2.4.0": {
+      "published": "2026-10-22T08:56:37.139212Z",
+      "verified_at": "2026-10-26T21:43:39Z"
     },
-    "icu_provider@2.3.1": {
-      "published": "2026-08-20T23:25:32.095205Z",
-      "verified_at": "2026-09-13T06:09:27Z"
+    "icu_properties@2.4.0": {
+      "published": "2026-10-22T08:56:21.837545Z",
+      "verified_at": "2026-10-26T21:43:39Z"
+    },
+    "icu_properties_data@2.4.0": {
+      "published": "2026-10-22T08:56:15.143869Z",
+      "verified_at": "2026-10-26T21:43:39Z"
+    },
+    "icu_provider@2.4.0": {
+      "published": "2026-10-22T08:52:08.277979Z",
+      "verified_at": "2026-10-26T21:43:39Z"
+    },
+    "icu_segmenter@2.4.0": {
+      "published": "2026-10-22T08:59:00.339192Z",
+      "verified_at": "2026-10-26T21:43:39Z"
+    },
+    "icu_segmenter_data@2.4.0": {
+      "published": "2026-10-22T08:58:51.193276Z",
+      "verified_at": "2026-10-26T21:43:39Z"
     },
     "ident_case@1.0.1": {
       "published": "2019-03-18T20:07:20.426691Z",
@@ -1547,6 +1599,10 @@
     "idna_adapter@1.2.2": {
       "published": "2026-04-27T17:45:54.838641Z",
       "verified_at": "2026-09-13T06:09:27Z"
+    },
+    "ignore@0.4.33": {
+      "published": "2026-08-04T13:59:40.311767Z",
+      "verified_at": "2026-10-25T07:20:59Z"
     },
     "impl-codec@0.6.0": {
       "published": "2022-02-04T11:00:37.224093Z",
@@ -1571,6 +1627,10 @@
     "indexmap@2.14.2": {
       "published": "2026-09-05T01:53:48.019655Z",
       "verified_at": "2026-09-13T06:09:27Z"
+    },
+    "inflections@1.1.1": {
+      "published": "2017-09-14T17:51:25.170557Z",
+      "verified_at": "2026-10-25T07:20:59Z"
     },
     "inventory@0.3.25": {
       "published": "2026-10-07T22:08:06.210492Z",
@@ -1744,6 +1804,10 @@
       "published": "2026-03-15T10:35:25.809035Z",
       "verified_at": "2026-09-13T06:09:27Z"
     },
+    "linked-hash-map@0.5.6": {
+      "published": "2022-06-25T19:52:40.173594Z",
+      "verified_at": "2026-10-25T07:20:59Z"
+    },
     "linux-raw-sys@0.12.1": {
       "published": "2025-12-23T00:00:07.059646Z",
       "verified_at": "2026-09-13T06:09:27Z"
@@ -1755,6 +1819,10 @@
     "lock_api@0.4.14": {
       "published": "2025-10-03T23:33:12.850087Z",
       "verified_at": "2026-09-13T06:09:27Z"
+    },
+    "lock_api@0.5.0": {
+      "published": "2026-10-21T10:30:36.849357Z",
+      "verified_at": "2026-10-25T02:28:09Z"
     },
     "log@0.4.34": {
       "published": "2026-08-22T11:44:27.941626Z",
@@ -1843,6 +1911,14 @@
     "nom@7.1.3": {
       "published": "2023-01-15T21:06:03.248351Z",
       "verified_at": "2026-09-13T06:09:27Z"
+    },
+    "nom@8.0.0": {
+      "published": "2025-01-26T16:03:28.068915Z",
+      "verified_at": "2026-10-25T07:20:59Z"
+    },
+    "nom_locate@5.0.0": {
+      "published": "2025-02-03T18:29:55.942967Z",
+      "verified_at": "2026-10-25T07:20:59Z"
     },
     "ntapi@0.4.3": {
       "published": "2026-02-10T12:59:29.080382Z",
@@ -1956,6 +2032,14 @@
       "published": "2025-10-03T23:34:14.078935Z",
       "verified_at": "2026-09-13T06:09:27Z"
     },
+    "parking_lot@0.13.0": {
+      "published": "2026-10-21T10:30:45.752743Z",
+      "verified_at": "2026-10-25T02:28:09Z"
+    },
+    "parking_lot_core@0.10.0": {
+      "published": "2026-10-21T10:30:41.689158Z",
+      "verified_at": "2026-10-25T02:28:09Z"
+    },
     "parking_lot_core@0.9.12": {
       "published": "2025-10-03T23:33:43.164426Z",
       "verified_at": "2026-09-13T06:09:27Z"
@@ -1971,6 +2055,18 @@
     "paste@1.0.15": {
       "published": "2024-05-07T01:50:22.784771Z",
       "verified_at": "2026-09-13T06:09:27Z"
+    },
+    "peg-macros@0.6.3": {
+      "published": "2020-07-22T03:04:11.746871Z",
+      "verified_at": "2026-10-25T07:20:59Z"
+    },
+    "peg-runtime@0.6.3": {
+      "published": "2020-07-22T03:03:14.368553Z",
+      "verified_at": "2026-10-25T07:20:59Z"
+    },
+    "peg@0.6.3": {
+      "published": "2020-07-22T03:04:24.611193Z",
+      "verified_at": "2026-10-25T07:20:59Z"
     },
     "pem@4.0.0": {
       "published": "2026-07-28T13:38:46.529827Z",
@@ -2268,13 +2364,17 @@
       "published": "2026-10-13T22:28:27.191131Z",
       "verified_at": "2026-10-17T07:45:59Z"
     },
-    "redis@1.7.1": {
-      "published": "2026-09-25T04:15:51.799572Z",
-      "verified_at": "2026-09-29T01:12:23Z"
+    "redis@1.8.0": {
+      "published": "2026-10-23T06:33:19.439555Z",
+      "verified_at": "2026-10-26T21:43:39Z"
     },
     "redox_syscall@0.5.18": {
       "published": "2025-10-04T14:57:04.747959Z",
       "verified_at": "2026-09-13T06:09:27Z"
+    },
+    "redox_syscall@0.9.5": {
+      "published": "2026-10-17T19:01:02.018979Z",
+      "verified_at": "2026-10-25T02:28:09Z"
     },
     "ref-cast-impl@1.0.27": {
       "published": "2026-08-19T04:27:24.118760Z",
@@ -2348,9 +2448,9 @@
       "published": "2024-06-03T16:39:36.769412Z",
       "verified_at": "2026-09-13T06:09:27Z"
     },
-    "ruint@1.20.1": {
-      "published": "2026-09-15T23:54:27.394062Z",
-      "verified_at": "2026-09-19T22:29:50Z"
+    "ruint@1.21.1": {
+      "published": "2026-10-23T18:48:24.899665Z",
+      "verified_at": "2026-10-26T21:43:39Z"
     },
     "rust_decimal@1.43.0": {
       "published": "2026-09-02T00:43:11.457502Z",
@@ -2471,6 +2571,10 @@
     "scopeguard@1.2.0": {
       "published": "2023-07-17T13:47:53.232324Z",
       "verified_at": "2026-09-13T06:09:27Z"
+    },
+    "sealed@0.6.0": {
+      "published": "2024-10-06T16:19:07.451936Z",
+      "verified_at": "2026-10-25T07:20:59Z"
     },
     "sec1@0.7.3": {
       "published": "2023-07-16T23:37:20.031224Z",
@@ -2644,9 +2748,17 @@
       "published": "2026-01-31T12:59:22.609198Z",
       "verified_at": "2026-09-13T06:09:27Z"
     },
-    "smallvec@1.16.3": {
-      "published": "2026-10-10T02:25:27.052021Z",
-      "verified_at": "2026-10-15T21:32:23Z"
+    "smallvec@1.16.4": {
+      "published": "2026-10-23T17:08:24.995029Z",
+      "verified_at": "2026-10-26T21:43:39Z"
+    },
+    "smart-default@0.7.1": {
+      "published": "2023-04-24T15:51:20.102795Z",
+      "verified_at": "2026-10-25T07:20:59Z"
+    },
+    "smawk@0.3.3": {
+      "published": "2026-06-16T07:57:57.903963Z",
+      "verified_at": "2026-10-25T07:20:59Z"
     },
     "snap@1.1.2": {
       "published": "2026-07-15T11:40:42.657953Z",
@@ -2788,6 +2900,18 @@
       "published": "2026-07-30T19:43:04.804397Z",
       "verified_at": "2026-09-19T22:29:50Z"
     },
+    "synthez-codegen@0.4.0": {
+      "published": "2025-12-12T11:47:27.669892Z",
+      "verified_at": "2026-10-25T07:20:59Z"
+    },
+    "synthez-core@0.4.0": {
+      "published": "2025-12-12T11:47:22.179046Z",
+      "verified_at": "2026-10-25T07:20:59Z"
+    },
+    "synthez@0.4.0": {
+      "published": "2025-12-12T11:47:32.890926Z",
+      "verified_at": "2026-10-25T07:20:59Z"
+    },
     "sysinfo@0.39.6": {
       "published": "2026-07-09T10:46:59.210840Z",
       "verified_at": "2026-09-13T06:09:27Z"
@@ -2816,9 +2940,17 @@
       "published": "2025-05-05T09:38:31.054314Z",
       "verified_at": "2026-09-13T06:09:27Z"
     },
+    "terminal_size@0.4.4": {
+      "published": "2026-03-23T16:39:14.510986Z",
+      "verified_at": "2026-10-25T07:20:59Z"
+    },
     "testing_table@0.3.0": {
       "published": "2025-04-24T20:50:49.558936Z",
       "verified_at": "2026-09-13T06:09:27Z"
+    },
+    "textwrap@0.16.4": {
+      "published": "2026-09-13T19:48:56.924244Z",
+      "verified_at": "2026-10-26T21:43:39Z"
     },
     "thiserror-impl@1.0.69": {
       "published": "2024-11-10T06:24:04.631987Z",
@@ -2864,9 +2996,9 @@
       "published": "2020-04-01T14:34:13.119797Z",
       "verified_at": "2026-09-13T06:09:27Z"
     },
-    "tinystr@0.8.4": {
-      "published": "2026-08-13T23:28:07.485828Z",
-      "verified_at": "2026-09-13T06:09:27Z"
+    "tinystr@0.8.5": {
+      "published": "2026-10-22T08:51:49.200908Z",
+      "verified_at": "2026-10-26T21:43:39Z"
     },
     "tinytemplate@1.2.1": {
       "published": "2021-03-04T00:05:08.069396Z",
@@ -2900,9 +3032,9 @@
       "published": "2026-10-09T11:02:11.456952Z",
       "verified_at": "2026-10-12T20:24:34Z"
     },
-    "tokio@1.53.3": {
-      "published": "2026-10-13T20:51:46.498182Z",
-      "verified_at": "2026-10-17T07:45:59Z"
+    "tokio@1.54.1": {
+      "published": "2026-10-21T21:05:43.950213Z",
+      "verified_at": "2026-10-25T02:28:09Z"
     },
     "toml@0.9.12+spec-1.1.0": {
       "published": "2026-02-10T18:10:32.779034Z",
@@ -3003,6 +3135,14 @@
     "twox-hash@2.1.5": {
       "published": "2026-10-04T14:59:48.248258Z",
       "verified_at": "2026-10-10T04:09:35Z"
+    },
+    "typed-builder-macro@0.23.2": {
+      "published": "2025-11-19T11:12:52.121946Z",
+      "verified_at": "2026-10-25T07:20:59Z"
+    },
+    "typed-builder@0.23.2": {
+      "published": "2025-11-19T11:12:56.673010Z",
+      "verified_at": "2026-10-25T07:20:59Z"
     },
     "typenum@1.20.1": {
       "published": "2026-05-29T16:00:41.793255Z",
@@ -3108,9 +3248,9 @@
       "published": "2024-06-08T07:07:41.813419Z",
       "verified_at": "2026-09-13T06:09:27Z"
     },
-    "uuid@1.28.0": {
-      "published": "2026-10-10T00:02:40.455859Z",
-      "verified_at": "2026-10-15T21:32:23Z"
+    "uuid@1.29.0": {
+      "published": "2026-10-23T09:59:10.723650Z",
+      "verified_at": "2026-10-26T21:43:39Z"
     },
     "valuable@0.1.1": {
       "published": "2025-01-17T00:46:34.256238Z",
@@ -3188,17 +3328,17 @@
       "published": "2024-03-01T10:51:46.373917Z",
       "verified_at": "2026-09-13T06:09:27Z"
     },
-    "webpki-root-certs@1.0.10": {
-      "published": "2026-10-19T20:11:38.525787Z",
-      "verified_at": "2026-10-20T21:02:49Z"
+    "webpki-root-certs@1.0.11": {
+      "published": "2026-10-23T08:25:18.441682Z",
+      "verified_at": "2026-10-26T21:51:36Z"
     },
     "webpki-roots@0.26.11": {
       "published": "2025-05-06T14:05:11.016513Z",
       "verified_at": "2026-09-13T06:09:27Z"
     },
-    "webpki-roots@1.0.10": {
-      "published": "2026-10-19T20:11:32.333071Z",
-      "verified_at": "2026-10-20T21:02:49Z"
+    "webpki-roots@1.0.11": {
+      "published": "2026-10-23T08:25:08.250247Z",
+      "verified_at": "2026-10-26T21:43:39Z"
     },
     "whoami@2.1.3": {
       "published": "2026-08-11T23:31:57.132972Z",
@@ -3352,9 +3492,9 @@
       "published": "2026-09-30T13:19:39.412870Z",
       "verified_at": "2026-10-05T03:27:26Z"
     },
-    "yoke@0.8.3": {
-      "published": "2026-06-03T20:59:17.678438Z",
-      "verified_at": "2026-09-13T06:09:27Z"
+    "yoke@0.8.4": {
+      "published": "2026-10-22T08:51:34.589056Z",
+      "verified_at": "2026-10-26T21:43:39Z"
     },
     "zerocopy-derive@0.8.63": {
       "published": "2026-10-13T20:01:58.185985Z",
@@ -3384,13 +3524,13 @@
       "published": "2026-08-13T23:28:19.996564Z",
       "verified_at": "2026-09-13T06:09:27Z"
     },
-    "zerovec-derive@0.11.6": {
-      "published": "2026-08-20T23:25:28.777419Z",
-      "verified_at": "2026-09-13T06:09:27Z"
+    "zerovec-derive@0.11.7": {
+      "published": "2026-10-22T08:51:38.515193Z",
+      "verified_at": "2026-10-26T21:43:39Z"
     },
-    "zerovec@0.11.8": {
-      "published": "2026-08-19T22:32:16.933982Z",
-      "verified_at": "2026-09-13T06:09:27Z"
+    "zerovec@0.11.9": {
+      "published": "2026-10-22T08:51:43.982490Z",
+      "verified_at": "2026-10-26T21:43:39Z"
     },
     "zlib-rs@0.6.8": {
       "published": "2026-09-15T13:10:00.283903Z",

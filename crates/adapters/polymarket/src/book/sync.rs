@@ -405,13 +405,7 @@ fn request_recovery(
 ) -> BookSequenceOutcome {
     let book = books.entry(instrument_id).or_insert_with(|| Book::new(now));
     book.ts_withheld = book.ts_withheld.max(ts_event);
-    let outcome = book.sync.gap();
-
-    if outcome == BookSequenceOutcome::Recover {
-        log::warn!("Book data rejected for {instrument_id}; requesting a fresh snapshot");
-    }
-
-    outcome
+    book.sync.gap()
 }
 
 #[cfg(test)]

@@ -306,10 +306,11 @@ impl OKXExecutionClient {
         &self,
         cmd: &GenerateOrderStatusReports,
         require_complete_active_coverage: bool,
+        max_history_pages: Option<u32>,
     ) -> anyhow::Result<OrderReportSweep> {
         let sweep = self
             .report_client()
-            .collect_order_status_reports(cmd, require_complete_active_coverage)
+            .collect_order_status_reports(cmd, require_complete_active_coverage, max_history_pages)
             .await?;
         Ok(finish_order_report_sweep(&self.core, sweep, cmd))
     }
@@ -318,9 +319,10 @@ impl OKXExecutionClient {
         &self,
         cmd: GenerateFillReports,
         history: FillHistory,
+        max_history_pages: Option<u32>,
     ) -> anyhow::Result<(Vec<FillReport>, bool)> {
         self.report_client()
-            .collect_fill_reports(cmd, history)
+            .collect_fill_reports(cmd, history, max_history_pages)
             .await
     }
 
@@ -632,8 +634,7 @@ impl OKXExecutionClient {
             order_side,
             order_type,
             context.is_quote_quantity,
-        )
-        .map_err(anyhow::Error::msg)?;
+        )?;
 
         let trailing_offset = order.trailing_offset();
         let trailing_offset_type = order.trailing_offset_type();
@@ -1991,7 +1992,7 @@ impl ExecutionClient for OKXExecutionClient {
         Some(ExecutionReportTask::new(
             async move {
                 let mut sweep = client
-                    .collect_order_status_reports(&collection_command, false)
+                    .collect_order_status_reports(&collection_command, false, None)
                     .await?;
                 sweep.regular_by_venue_order_id = AHashMap::new();
                 sweep.ambiguous_triggered_child_ids = AHashSet::new();
@@ -2010,7 +2011,7 @@ impl ExecutionClient for OKXExecutionClient {
         Some(ExecutionReportTask::new(
             async move {
                 client
-                    .collect_fill_reports(command, FillHistory::Recent)
+                    .collect_fill_reports(command, FillHistory::Recent, None)
                     .await
             },
             |(reports, _)| Ok(reports),
@@ -2042,14 +2043,20 @@ impl ExecutionClient for OKXExecutionClient {
         &self,
         cmd: &GenerateOrderStatusReports,
     ) -> anyhow::Result<Vec<OrderStatusReport>> {
-        Ok(self.collect_order_status_reports(cmd, false).await?.reports)
+        Ok(self
+            .collect_order_status_reports(cmd, false, None)
+            .await?
+            .reports)
     }
 
     async fn generate_fill_reports(
         &self,
         cmd: GenerateFillReports,
     ) -> anyhow::Result<Vec<FillReport>> {
-        Ok(self.collect_fill_reports(cmd, FillHistory::Recent).await?.0)
+        Ok(self
+            .collect_fill_reports(cmd, FillHistory::Recent, None)
+            .await?
+            .0)
     }
 
     async fn generate_position_status_reports(
@@ -2102,8 +2109,16 @@ impl ExecutionClient for OKXExecutionClient {
             (fill_reports, fills_complete),
             (mut position_reports, positions_complete),
         ) = tokio::try_join!(
-            self.collect_order_status_reports(&order_cmd, true),
-            self.collect_fill_reports(fill_cmd, fill_history),
+            self.collect_order_status_reports(
+                &order_cmd,
+                true,
+                self.config.max_reconciliation_history_pages,
+            ),
+            self.collect_fill_reports(
+                fill_cmd,
+                fill_history,
+                self.config.max_reconciliation_history_pages,
+            ),
             self.collect_position_status_reports(&position_cmd),
         )?;
         let OrderReportSweep {
@@ -3056,6 +3071,7 @@ impl OKXReportClient {
         &self,
         cmd: &GenerateOrderStatusReports,
         require_complete_active_coverage: bool,
+        max_history_pages: Option<u32>,
     ) -> anyhow::Result<OrderReportSweep> {
         let instrument_types = Self::instrument_types(&self.instrument_types);
         let routing_types = order_routing_instrument_types(&instrument_types);
@@ -3079,6 +3095,7 @@ impl OKXReportClient {
                     cmd.open_only,
                     None,
                     Some(scope),
+                    max_history_pages,
                 )
                 .await?;
 
@@ -3110,6 +3127,7 @@ impl OKXReportClient {
                         start,
                         end,
                         require_complete_active_coverage,
+                        max_history_pages,
                     )
                     .await
                 {
@@ -3150,6 +3168,7 @@ impl OKXReportClient {
                         cmd.open_only,
                         None,
                         Some(scope),
+                        max_history_pages,
                     )
                     .await?;
 
@@ -3177,6 +3196,7 @@ impl OKXReportClient {
                             start,
                             end,
                             require_complete_active_coverage,
+                            max_history_pages,
                         )
                         .await
                     {
@@ -3219,6 +3239,7 @@ impl OKXReportClient {
                     cmd.open_only,
                     None,
                     Some(scope),
+                    max_history_pages,
                 )
                 .await
             {
@@ -3260,6 +3281,7 @@ impl OKXReportClient {
         &self,
         cmd: GenerateFillReports,
         history: FillHistory,
+        max_history_pages: Option<u32>,
     ) -> anyhow::Result<(Vec<FillReport>, bool)> {
         let instrument_types = Self::instrument_types(&self.instrument_types);
         let routing_types = order_routing_instrument_types(&instrument_types);
@@ -3281,6 +3303,7 @@ impl OKXReportClient {
                     None,
                     history,
                     Some(scope),
+                    max_history_pages,
                 )
                 .await?;
             reports.extend(sweep.reports);
@@ -3298,6 +3321,7 @@ impl OKXReportClient {
                         None,
                         history,
                         Some(scope),
+                        max_history_pages,
                     )
                     .await?;
                 reports.extend(sweep.reports);
@@ -3316,6 +3340,7 @@ impl OKXReportClient {
                         None,
                         history,
                         Some(scope),
+                        max_history_pages,
                     )
                     .await?;
                 reports.extend(sweep.reports);
@@ -3601,8 +3626,7 @@ fn validate_order(
         order.order_side(),
         order.order_type(),
         order.is_quote_quantity(),
-    )
-    .map_err(|detail| OrderDeniedReason::ValidationFailed { detail })?;
+    )?;
 
     validate_algo_trigger_type(
         okx_instrument_type_from_symbol(order.instrument_id().symbol.as_str()),
@@ -5724,43 +5748,43 @@ mod tests {
         OrderType::StopMarket,
         OrderSide::Sell,
         true,
-        "OKX Spot STOP_MARKET algo orders do not support quote quantity"
+        "UNSUPPORTED_QUOTE_QUANTITY"
     )]
     #[case(
         OrderType::MarketIfTouched,
         OrderSide::Sell,
         true,
-        "OKX Spot MARKET_IF_TOUCHED algo orders do not support quote quantity"
+        "UNSUPPORTED_QUOTE_QUANTITY"
     )]
     #[case(
         OrderType::TrailingStopMarket,
         OrderSide::Sell,
         true,
-        "OKX Spot TRAILING_STOP_MARKET algo orders do not support quote quantity"
+        "UNSUPPORTED_QUOTE_QUANTITY"
     )]
     #[case(
         OrderType::StopLimit,
         OrderSide::Sell,
         true,
-        "OKX Spot STOP_LIMIT algo orders do not support quote quantity"
+        "UNSUPPORTED_QUOTE_QUANTITY"
     )]
     #[case(
         OrderType::LimitIfTouched,
         OrderSide::Sell,
         true,
-        "OKX Spot LIMIT_IF_TOUCHED algo orders do not support quote quantity"
+        "UNSUPPORTED_QUOTE_QUANTITY"
     )]
     #[case(
         OrderType::StopLimit,
         OrderSide::Buy,
         true,
-        "OKX Spot STOP_LIMIT algo orders do not support quote quantity"
+        "UNSUPPORTED_QUOTE_QUANTITY"
     )]
     #[case(
         OrderType::LimitIfTouched,
         OrderSide::Buy,
         true,
-        "OKX Spot LIMIT_IF_TOUCHED algo orders do not support quote quantity"
+        "UNSUPPORTED_QUOTE_QUANTITY"
     )]
     #[case(
         OrderType::TrailingStopMarket,
@@ -5833,7 +5857,9 @@ mod tests {
 
         assert_eq!(denied.client_order_id, order.client_order_id());
 
-        let expected = if expected_reason.ends_with("triggers") {
+        let expected = if expected_reason == "UNSUPPORTED_QUOTE_QUANTITY" {
+            expected_reason.to_string()
+        } else if expected_reason.ends_with("triggers") {
             format!("VALIDATION_FAILED: {expected_reason}")
         } else {
             format!("VALIDATION_FAILED: {expected_reason} in {trade_mode} mode")

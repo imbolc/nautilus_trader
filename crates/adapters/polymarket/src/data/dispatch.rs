@@ -330,6 +330,7 @@ fn request_book_recovery(
     ctx: &WsMessageContext,
     instrument_id: InstrumentId,
     ts_event: Option<UnixNanos>,
+    reason: &str,
 ) {
     let outcome = ctx.subscriptions.book_sync.request_recovery_if_subscribed(
         &ctx.subscriptions.active_delta_subs,
@@ -339,7 +340,9 @@ fn request_book_recovery(
     );
 
     log::debug!("Book recovery for {instrument_id}: ts_event={ts_event:?}, outcome={outcome:?}");
+
     if outcome == BookSequenceOutcome::Recover {
+        log::debug!("Resyncing book for {instrument_id} {reason}");
         start_book_recovery(ctx, instrument_id);
     }
 }
@@ -393,7 +396,12 @@ fn handle_market_message(message: MarketWsMessage, ctx: &WsMessageContext) {
                 Ok(timestamp) => timestamp,
                 Err(e) => {
                     log::error!("Failed to parse book snapshot timestamp: {e}");
-                    request_book_recovery(ctx, instrument_id, None);
+                    request_book_recovery(
+                        ctx,
+                        instrument_id,
+                        None,
+                        "after snapshot timestamp parse failure",
+                    );
                     return;
                 }
             };
@@ -498,7 +506,7 @@ fn handle_market_message(message: MarketWsMessage, ctx: &WsMessageContext) {
                         }
                     },
                     Err(e) => {
-                        log::error!("Failed to parse book snapshot: {e}");
+                        log::error!("Failed to parse book snapshot for {instrument_id}: {e}");
                         None
                     }
                 };
@@ -546,7 +554,12 @@ fn handle_market_message(message: MarketWsMessage, ctx: &WsMessageContext) {
                         // The snapshot could not seed the book; without an
                         // accepted snapshot the book stays gated inside the
                         // current episode.
-                        request_book_recovery(ctx, instrument_id, Some(ts_event));
+                        request_book_recovery(
+                            ctx,
+                            instrument_id,
+                            Some(ts_event),
+                            "after snapshot application failure",
+                        );
                     }
                 }
             }
@@ -816,7 +829,7 @@ fn handle_market_message(message: MarketWsMessage, ctx: &WsMessageContext) {
                 |instrument| {
                     if let Err(e) = ctx
                         .data_sender
-                        .send(DataEvent::Instrument(instrument.clone()))
+                        .send(DataEvent::Data(instrument.clone().into()))
                     {
                         log::error!("Failed to emit rebuilt instrument: {e}");
                     }
@@ -835,7 +848,8 @@ fn handle_market_message(message: MarketWsMessage, ctx: &WsMessageContext) {
                 .remove(&instrument_id);
             ctx.subscriptions.order_books.remove(&instrument_id);
             ctx.subscriptions.book_sync.reset_timestamp(instrument_id);
-            request_book_recovery(ctx, instrument_id, None);
+
+            request_book_recovery(ctx, instrument_id, None, "after tick size change");
         }
 
         MarketWsMessage::NewMarket(nm) => {
@@ -1003,7 +1017,7 @@ fn handle_market_message(message: MarketWsMessage, ctx: &WsMessageContext) {
                                 &inst,
                                 |instrument| {
                                     if let Err(e) =
-                                        data_sender.send(DataEvent::Instrument(instrument.clone()))
+                                        data_sender.send(DataEvent::Data(instrument.clone().into()))
                                     {
                                         log::error!(
                                             "Failed to emit new market instrument {instrument_id}: {e}"
@@ -1029,9 +1043,9 @@ fn handle_market_message(message: MarketWsMessage, ctx: &WsMessageContext) {
                                         None,
                                     );
 
-                                    if let Err(e) =
-                                        data_sender.send(DataEvent::InstrumentStatus(status))
-                                    {
+                                    if let Err(e) = data_sender.send(DataEvent::Data(
+                                        NautilusData::InstrumentStatus(status),
+                                    )) {
                                         log::error!(
                                             "Failed to emit instrument status for {instrument_id}: {e}"
                                         );
@@ -1570,13 +1584,13 @@ mod tests {
     use nautilus_model::{
         data::{BookOrder, CustomData as ModelCustomData, DataType, OrderBookDelta},
         enums::{
-            BookAction, InstrumentCloseType, MarketStatusAction, OrderSide, PositionSide,
-            RecordFlag,
+            AggressorSide, BookAction, InstrumentCloseType, MarketStatusAction, OrderSide,
+            PositionSide, RecordFlag,
         },
         events::{PositionEvent, PositionOpened},
         identifiers::{
             AccountId, ClientId, ClientOrderId, InstrumentId, PositionId, StrategyId, Symbol,
-            TraderId,
+            TradeId, TraderId,
         },
         instruments::stubs::binary_option,
         types::{Currency, Price, Quantity},
@@ -1608,7 +1622,7 @@ mod tests {
             messages::{
                 PolymarketBestBidAsk, PolymarketBookLevel, PolymarketBookSnapshot,
                 PolymarketMarketResolved, PolymarketQuote, PolymarketQuotes,
-                PolymarketTickSizeChange,
+                PolymarketTickSizeChange, PolymarketTrade,
             },
             pool::PolymarketMarketConnectionPool,
         },
@@ -2287,6 +2301,107 @@ mod tests {
     }
 
     #[rstest]
+    #[case(Some("v2"))]
+    #[case(None)]
+    #[case(Some("unknown"))]
+    #[tokio::test]
+    async fn unsupported_market_is_terminal(
+        #[case] version: Option<&str>,
+        #[values(false, true)] auto_load: bool,
+        #[values(false, true)] empty_ids: bool,
+        #[values(false, true)] closed: bool,
+    ) {
+        let mut market = gamma_market_recheck_fixture_value();
+        market["version"] = serde_json::json!(version);
+        market["closed"] = closed.into();
+        if empty_ids {
+            market["clobTokenIds"] = "[]".into();
+        }
+
+        let state = ScriptedAutoLoadServerState::new(
+            vec![ScriptedAutoLoadReply::ok(serde_json::json!([market]))],
+            vec![],
+        );
+        let addr = start_scripted_auto_load_test_server(state.clone()).await;
+        let (mut client, mut data_rx) = create_test_client(addr);
+        client.config.auto_load_debounce_ms = 0;
+        client.subscriptions.subscribe_new_markets = true;
+        let ctx = make_client_ws_ctx(&client);
+
+        if auto_load {
+            let instrument_id = fixture_yes_instrument_id();
+            client.subscriptions.active_quote_subs.insert(instrument_id);
+            client.queue_pending_load(instrument_id);
+        } else {
+            handle_market_message(
+                make_new_market_with_condition("unsupported", TEST_CONDITION_ID, true),
+                &ctx,
+            );
+        }
+
+        wait_until_async(
+            || async {
+                !state.queries.lock().is_empty()
+                    && !client.auto_load_scheduled.load(Ordering::Acquire)
+                    && ctx.new_market_inflight_keys.is_empty()
+                    && client.tasks.all_finished()
+            },
+            StdDuration::from_secs(3),
+        )
+        .await;
+
+        assert_eq!(state.queries.lock().len(), 1);
+        assert!(client.instruments.load().is_empty());
+        assert!(client.subscriptions.token_meta.is_empty());
+        assert!(client.resolve_poll_watchlist.read().is_empty());
+        assert!(data_rx.try_recv().is_err());
+    }
+
+    #[rstest]
+    #[case(Some("v2"))]
+    #[case(None)]
+    #[case(Some("unknown"))]
+    #[tokio::test]
+    async fn unsupported_market_from_closed_probe_is_terminal(
+        #[case] version: Option<&str>,
+        #[values(false, true)] empty_ids: bool,
+    ) {
+        let mut market = gamma_market_recheck_fixture_value();
+        market["version"] = serde_json::json!(version);
+        market["closed"] = true.into();
+        if empty_ids {
+            market["clobTokenIds"] = "[]".into();
+        }
+
+        let state = ScriptedAutoLoadServerState::new(
+            vec![ScriptedAutoLoadReply::ok(serde_json::json!([]))],
+            vec![ScriptedAutoLoadReply::ok(serde_json::json!([market]))],
+        );
+        let addr = start_scripted_auto_load_test_server(state.clone()).await;
+        let (mut client, mut data_rx) = create_test_client(addr);
+        client.config.auto_load_debounce_ms = 0;
+        let instrument_id = fixture_yes_instrument_id();
+        client.subscriptions.active_quote_subs.insert(instrument_id);
+        client.queue_pending_load(instrument_id);
+
+        wait_until_async(
+            || async {
+                !state.queries.lock().is_empty()
+                    && !client.auto_load_scheduled.load(Ordering::Acquire)
+                    && client.tasks.all_finished()
+            },
+            StdDuration::from_secs(3),
+        )
+        .await;
+
+        assert_eq!(state.queries.lock().len(), 2);
+        assert!(client.instruments.load().is_empty());
+        assert!(client.subscriptions.token_meta.is_empty());
+        assert!(client.resolve_poll_watchlist.read().is_empty());
+        assert!(data_rx.try_recv().is_err());
+    }
+
+    #[rstest]
     #[tokio::test]
     async fn new_market_condition_empty_then_success_recheck_loads_instrument() {
         let state = NewMarketFetchTestServerState::default();
@@ -2347,14 +2462,14 @@ mod tests {
         while let Ok(Some(event)) =
             tokio::time::timeout(Duration::from_millis(200), data_rx.recv()).await
         {
-            if matches!(event, DataEvent::Instrument(_)) {
+            if matches!(event, DataEvent::Data(NautilusData::Instrument(_))) {
                 emitted_instrument = true;
                 break;
             }
         }
         assert!(
             emitted_instrument,
-            "expected emitted DataEvent::Instrument after successful recheck"
+            "expected emitted DataEvent::Data(NautilusData::Instrument(...)) after successful recheck"
         );
     }
 
@@ -2430,7 +2545,7 @@ mod tests {
         let published = events
             .iter()
             .filter_map(|event| match event {
-                DataEvent::Instrument(instrument) => Some(instrument),
+                DataEvent::Data(NautilusData::Instrument(instrument)) => Some(instrument),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -2445,7 +2560,7 @@ mod tests {
             assert_eq!(crate::filters::market_closed(instrument), Some(false));
             assert_eq!(
                 client.instruments.get_cloned(&instrument.id()),
-                Some(instrument.clone())
+                Some(instrument.as_ref().clone())
             );
         }
     }
@@ -2536,7 +2651,7 @@ mod tests {
         let publish_count = events
             .iter()
             .filter_map(|event| match event {
-                DataEvent::Instrument(instrument) => Some(instrument),
+                DataEvent::Data(NautilusData::Instrument(instrument)) => Some(instrument),
                 _ => None,
             })
             .count();
@@ -2736,7 +2851,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .all(|event| !matches!(event, DataEvent::Instrument(_)))
+                .all(|event| !matches!(event, DataEvent::Data(NautilusData::Instrument(_))))
         );
         assert!(client.instruments.load().is_empty());
         assert!(client.subscriptions.token_meta.is_empty());
@@ -2787,7 +2902,7 @@ mod tests {
         .expect("timed out waiting for instrument response");
 
         let published = events.iter().find_map(|event| match event {
-            DataEvent::Instrument(instrument) => Some(instrument),
+            DataEvent::Data(NautilusData::Instrument(instrument)) => Some(instrument.as_ref()),
             _ => None,
         });
         let response = events.iter().find_map(|event| match event {
@@ -3450,6 +3565,7 @@ mod tests {
             "id": "1557558",
             "conditionId": condition_id,
             "questionID": "0xquestion",
+            "version": "v1",
             "clobTokenIds": clob_token_ids,
             "outcomes": "[\"Yes\",\"No\"]",
             "question": "Will test pass?",
@@ -3478,6 +3594,7 @@ mod tests {
         closed: bool,
     ) -> Value {
         serde_json::json!({
+            "version": "v1",
             "condition_id": condition_id,
             "closed": closed,
             "tokens": [
@@ -3934,6 +4051,67 @@ mod tests {
     }
 
     #[rstest]
+    #[case::subscribed(true, false)]
+    #[case::unsubscribed(false, false)]
+    #[case::resolved(true, true)]
+    fn last_trade_dispatch_requires_active_open_subscription(
+        #[case] subscribed: bool,
+        #[case] resolved: bool,
+    ) {
+        let (ctx, mut data_rx) = make_ws_ctx();
+        let trade: PolymarketTrade =
+            serde_json::from_str(include_str!("../../test_data/ws_last_trade.json")).unwrap();
+        let mut instrument = stub_instrument(
+            trade.asset_id.as_str(),
+            Price::from("0.0001"),
+            Quantity::from("0.000001"),
+        );
+
+        let InstrumentAny::BinaryOption(binary) = &mut instrument else {
+            panic!("expected binary option");
+        };
+
+        binary.id = InstrumentId::from(format!("{}-{}.POLYMARKET", trade.market, trade.asset_id));
+        cache_instrument_unchecked(&ctx.instruments, &ctx.subscriptions.token_meta, &instrument);
+        if subscribed {
+            ctx.subscriptions.active_trade_subs.insert(instrument.id());
+        }
+
+        if resolved {
+            ctx.subscriptions
+                .closed_condition_ids
+                .lock()
+                .insert(trade.market.to_string());
+        }
+
+        let before = ctx.clock.get_time_ns();
+        handle_market_message(MarketWsMessage::LastTradePrice(trade), &ctx);
+        let after = ctx.clock.get_time_ns();
+        let events = std::iter::from_fn(|| data_rx.try_recv().ok()).collect::<Vec<_>>();
+
+        if !subscribed || resolved {
+            assert!(events.is_empty());
+            return;
+        }
+
+        assert_eq!(events.len(), 1);
+
+        let DataEvent::Data(NautilusData::Trade(tick)) = &events[0] else {
+            panic!("expected trade tick");
+        };
+
+        assert_eq!(tick.instrument_id, instrument.id());
+        assert_eq!(tick.price, Price::from("0.5100"));
+        assert_eq!(tick.price.precision, 4);
+        assert_eq!(tick.size, Quantity::from("25.000000"));
+        assert_eq!(tick.size.precision, 6);
+        assert_eq!(tick.aggressor_side, AggressorSide::Buy);
+        assert_eq!(tick.trade_id, TradeId::from("9571b9f1372edac4"));
+        assert_eq!(tick.ts_event, UnixNanos::from(1_703_875_202_000_000_000));
+        assert!(tick.ts_init >= before && tick.ts_init <= after);
+    }
+
+    #[rstest]
     #[tokio::test]
     async fn market_resolved_emits_grouped_close_and_removes_watch_entry() {
         let (ctx, mut data_rx) = make_ws_ctx();
@@ -3989,7 +4167,7 @@ mod tests {
         let events: Vec<DataEvent> = std::iter::from_fn(|| data_rx.try_recv().ok()).collect();
         let statuses = events
             .iter()
-            .filter(|event| matches!(event, DataEvent::InstrumentStatus(_)))
+            .filter(|event| matches!(event, DataEvent::Data(NautilusData::InstrumentStatus(_))))
             .count();
         assert_eq!(statuses, 2);
 
@@ -4336,7 +4514,8 @@ mod tests {
 
         assert_eq!(events.len(), 2);
         assert!(events.iter().all(|event| match event {
-            DataEvent::InstrumentStatus(status) => status.instrument_id == instrument_id,
+            DataEvent::Data(NautilusData::InstrumentStatus(status)) =>
+                status.instrument_id == instrument_id,
             DataEvent::Data(NautilusData::InstrumentClose(close)) => {
                 close.instrument_id == instrument_id
                     && close.close_price.as_decimal() == rust_decimal::Decimal::ONE
@@ -5569,7 +5748,9 @@ mod tests {
         let emitted_instrument = tokio::time::timeout(StdDuration::from_secs(1), async {
             loop {
                 match data_rx.recv().await {
-                    Some(DataEvent::Instrument(instrument)) if instrument.id() == instrument_id => {
+                    Some(DataEvent::Data(NautilusData::Instrument(instrument)))
+                        if instrument.id() == instrument_id =>
+                    {
                         return instrument;
                     }
                     Some(_) => {}
@@ -6691,7 +6872,7 @@ mod tests {
         let status = tokio::time::timeout(StdDuration::from_secs(2), async {
             loop {
                 match data_rx.recv().await {
-                    Some(DataEvent::InstrumentStatus(status))
+                    Some(DataEvent::Data(NautilusData::InstrumentStatus(status)))
                         if status.instrument_id == instrument_id =>
                     {
                         return status;
@@ -6779,7 +6960,7 @@ mod tests {
         let status = tokio::time::timeout(StdDuration::from_secs(2), async {
             loop {
                 match data_rx.recv().await {
-                    Some(DataEvent::InstrumentStatus(status))
+                    Some(DataEvent::Data(NautilusData::InstrumentStatus(status)))
                         if status.instrument_id == instrument_id =>
                     {
                         return status;
@@ -6909,7 +7090,7 @@ mod tests {
         .await;
 
         assert!(
-            matches!(events.as_slice(), [DataEvent::InstrumentStatus(status), DataEvent::Data(NautilusData::InstrumentClose(close))]
+            matches!(events.as_slice(), [DataEvent::Data(NautilusData::InstrumentStatus(status)), DataEvent::Data(NautilusData::InstrumentClose(close))]
             if status.instrument_id == sibling.id() && close.instrument_id == sibling.id()
                 && close.close_price.as_decimal() == rust_decimal::Decimal::ZERO)
         );
@@ -6938,7 +7119,7 @@ mod tests {
         .await;
         let events = std::iter::from_fn(|| data_rx.try_recv().ok()).collect::<Vec<_>>();
         assert!(
-            matches!(events.as_slice(), [DataEvent::Instrument(_), DataEvent::InstrumentStatus(status)]
+            matches!(events.as_slice(), [DataEvent::Data(NautilusData::Instrument(_)), DataEvent::Data(NautilusData::InstrumentStatus(status))]
             if status.instrument_id == instrument_id && status.action == MarketStatusAction::Close)
         );
         assert!(
@@ -7620,7 +7801,7 @@ mod tests {
 
         while let Ok(event) = data_rx.try_recv() {
             match event {
-                DataEvent::InstrumentStatus(status) => statuses.push(status),
+                DataEvent::Data(NautilusData::InstrumentStatus(status)) => statuses.push(status),
                 DataEvent::Data(NautilusData::InstrumentClose(close)) => closes.push(close),
                 _ => {}
             }
@@ -7859,7 +8040,9 @@ mod tests {
             } else {
                 events
                     .iter()
-                    .filter(|event| matches!(event, DataEvent::InstrumentStatus(_)))
+                    .filter(|event| {
+                        matches!(event, DataEvent::Data(NautilusData::InstrumentStatus(_)))
+                    })
                     .count()
                     == usize::from(status_intent)
                     && count_instrument_close_events(events) == usize::from(close_intent)
@@ -7875,7 +8058,7 @@ mod tests {
         assert_eq!(
             events
                 .iter()
-                .filter(|event| matches!(event, DataEvent::InstrumentStatus(_)))
+                .filter(|event| matches!(event, DataEvent::Data(NautilusData::InstrumentStatus(_))))
                 .count(),
             usize::from(status_intent)
         );
@@ -7970,7 +8153,7 @@ mod tests {
         assert_eq!(
             events
                 .iter()
-                .filter(|event| matches!(event, DataEvent::InstrumentStatus(_)))
+                .filter(|event| matches!(event, DataEvent::Data(NautilusData::InstrumentStatus(_))))
                 .count(),
             2
         );
@@ -8069,7 +8252,7 @@ mod tests {
         let statuses = events
             .iter()
             .filter_map(|event| match event {
-                DataEvent::InstrumentStatus(status) => Some(status),
+                DataEvent::Data(NautilusData::InstrumentStatus(status)) => Some(status),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -8176,7 +8359,7 @@ mod tests {
         })
         .await;
         assert!(
-            matches!(events.as_slice(), [DataEvent::InstrumentStatus(status), DataEvent::Data(NautilusData::InstrumentClose(close))]
+            matches!(events.as_slice(), [DataEvent::Data(NautilusData::InstrumentStatus(status)), DataEvent::Data(NautilusData::InstrumentClose(close))]
             if status.instrument_id == sibling.id() && close.instrument_id == sibling.id())
         );
 
@@ -8202,8 +8385,8 @@ mod tests {
             let [
                 _,
                 _,
-                DataEvent::Instrument(published),
-                DataEvent::InstrumentStatus(status),
+                DataEvent::Data(NautilusData::Instrument(published)),
+                DataEvent::Data(NautilusData::InstrumentStatus(status)),
                 DataEvent::Data(NautilusData::InstrumentClose(close)),
             ] = events.as_slice()
             else {
@@ -8229,7 +8412,7 @@ mod tests {
         assert_eq!(
             events
                 .iter()
-                .filter(|event| matches!(event, DataEvent::InstrumentStatus(_)))
+                .filter(|event| matches!(event, DataEvent::Data(NautilusData::InstrumentStatus(_))))
                 .count(),
             1 + usize::from(accepted)
         );
@@ -8366,7 +8549,7 @@ mod tests {
         assert_eq!(
             events
                 .iter()
-                .filter(|event| matches!(event, DataEvent::InstrumentStatus(_)))
+                .filter(|event| matches!(event, DataEvent::Data(NautilusData::InstrumentStatus(_))))
                 .count(),
             expected_closes
         );
@@ -8451,7 +8634,7 @@ mod tests {
         assert_eq!(
             events
                 .iter()
-                .filter(|event| matches!(event, DataEvent::InstrumentStatus(_)))
+                .filter(|event| matches!(event, DataEvent::Data(NautilusData::InstrumentStatus(_))))
                 .count(),
             usize::from(accepted)
         );
@@ -8545,7 +8728,7 @@ mod tests {
         assert_eq!(
             events
                 .iter()
-                .filter(|event| matches!(event, DataEvent::InstrumentStatus(_)))
+                .filter(|event| matches!(event, DataEvent::Data(NautilusData::InstrumentStatus(_))))
                 .count(),
             2
         );
@@ -8617,7 +8800,7 @@ mod tests {
         assert_eq!(
             events
                 .iter()
-                .filter(|event| matches!(event, DataEvent::InstrumentStatus(_)))
+                .filter(|event| matches!(event, DataEvent::Data(NautilusData::InstrumentStatus(_))))
                 .count(),
             1
         );
@@ -8758,7 +8941,7 @@ mod tests {
         assert_eq!(
             events
                 .iter()
-                .filter(|event| matches!(event, DataEvent::InstrumentStatus(_)))
+                .filter(|event| matches!(event, DataEvent::Data(NautilusData::InstrumentStatus(_))))
                 .count(),
             1
         );
@@ -8944,7 +9127,7 @@ mod tests {
 
         while let Ok(event) = data_rx.try_recv() {
             match event {
-                DataEvent::InstrumentStatus(status) => {
+                DataEvent::Data(NautilusData::InstrumentStatus(status)) => {
                     assert_eq!(status.instrument_id, instrument_id);
                     statuses += 1;
                 }
@@ -9045,7 +9228,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .all(|event| !matches!(event, DataEvent::InstrumentStatus(_)))
+                .all(|event| !matches!(event, DataEvent::Data(NautilusData::InstrumentStatus(_))))
         );
     }
 
@@ -9178,7 +9361,7 @@ mod tests {
 
         while let Ok(event) = data_rx.try_recv() {
             match event {
-                DataEvent::InstrumentStatus(status) => statuses.push(status),
+                DataEvent::Data(NautilusData::InstrumentStatus(status)) => statuses.push(status),
                 DataEvent::Data(NautilusData::InstrumentClose(close)) => closes.push(close),
                 _ => {}
             }
@@ -9271,7 +9454,7 @@ mod tests {
         assert_eq!(
             events
                 .iter()
-                .filter(|event| matches!(event, DataEvent::InstrumentStatus(_)))
+                .filter(|event| matches!(event, DataEvent::Data(NautilusData::InstrumentStatus(_))))
                 .count(),
             1
         );
@@ -9350,7 +9533,7 @@ mod tests {
         let statuses = events
             .iter()
             .filter_map(|event| match event {
-                DataEvent::InstrumentStatus(status) => Some(status),
+                DataEvent::Data(NautilusData::InstrumentStatus(status)) => Some(status),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -9521,7 +9704,9 @@ mod tests {
         while let Ok(event) = data_rx.try_recv() {
             assert!(!matches!(
                 event,
-                DataEvent::InstrumentStatus(_) | DataEvent::Data(NautilusData::InstrumentClose(_))
+                DataEvent::Data(
+                    NautilusData::InstrumentStatus(_) | NautilusData::InstrumentClose(_)
+                )
             ));
         }
     }
@@ -9766,7 +9951,7 @@ mod tests {
         );
 
         while let Ok(event) = data_rx.try_recv() {
-            if let DataEvent::Instrument(instrument) = event {
+            if let DataEvent::Data(NautilusData::Instrument(instrument)) = event {
                 assert_ne!(crate::filters::market_closed(&instrument), Some(false));
             }
         }
@@ -9814,7 +9999,9 @@ mod tests {
         let emitted_instrument = tokio::time::timeout(StdDuration::from_secs(3), async {
             loop {
                 match data_rx.recv().await {
-                    Some(DataEvent::Instrument(instrument)) if instrument.id() == instrument_id => {
+                    Some(DataEvent::Data(NautilusData::Instrument(instrument)))
+                        if instrument.id() == instrument_id =>
+                    {
                         return instrument;
                     }
                     Some(_) => {}
@@ -9954,7 +10141,7 @@ mod tests {
         assert_eq!(state.market_payloads.lock().await.len(), 1);
 
         let mut published_requested = false;
-        while let Ok(DataEvent::Instrument(instrument)) = data_rx.try_recv() {
+        while let Ok(DataEvent::Data(NautilusData::Instrument(instrument))) = data_rx.try_recv() {
             published_requested |= instrument.id() == instrument_id;
         }
         assert!(published_requested);
@@ -10436,7 +10623,9 @@ mod tests {
 
         let published = std::iter::from_fn(|| data_rx.try_recv().ok())
             .filter_map(|event| match event {
-                DataEvent::Instrument(instrument) if instrument.id() == instrument_id => {
+                DataEvent::Data(NautilusData::Instrument(instrument))
+                    if instrument.id() == instrument_id =>
+                {
                     Some(crate::filters::market_closed(&instrument))
                 }
                 _ => None,
@@ -11816,12 +12005,17 @@ mod tests {
 
         let events: Vec<DataEvent> = std::iter::from_fn(|| data_rx.try_recv().ok()).collect();
         assert!(
-            events.iter().any(|e| matches!(e, DataEvent::Instrument(_))),
+            events
+                .iter()
+                .any(|e| matches!(e, DataEvent::Data(NautilusData::Instrument(_)))),
             "expected rebuilt instrument event, found: {events:?}",
         );
         assert!(
-            !events.iter().any(|e| matches!(e, DataEvent::Data(_))),
-            "tick size change must not emit Data events: {events:?}",
+            !events.iter().any(|e| matches!(
+                e,
+                DataEvent::Data(data) if !matches!(data, NautilusData::Instrument(_))
+            )),
+            "tick size change must not emit market data: {events:?}",
         );
     }
 
@@ -12009,7 +12203,9 @@ mod tests {
 
         let events: Vec<DataEvent> = std::iter::from_fn(|| data_rx.try_recv().ok()).collect();
         assert!(
-            events.iter().any(|e| matches!(e, DataEvent::Instrument(_))),
+            events
+                .iter()
+                .any(|e| matches!(e, DataEvent::Data(NautilusData::Instrument(_)))),
             "expected rebuilt instrument event, found: {events:?}",
         );
     }
@@ -12033,7 +12229,7 @@ mod tests {
                 &gamma_instrument,
                 |instrument| {
                     ctx.data_sender
-                        .send(DataEvent::Instrument(instrument.clone()))
+                        .send(DataEvent::Data(instrument.clone().into()))
                         .expect("data event receiver");
                 },
             )
@@ -12053,7 +12249,7 @@ mod tests {
             .expect("effective instrument");
         let published = std::iter::from_fn(|| data_rx.try_recv().ok())
             .filter_map(|event| match event {
-                DataEvent::Instrument(instrument) => Some(instrument),
+                DataEvent::Data(NautilusData::Instrument(instrument)) => Some(instrument),
                 _ => None,
             })
             .last()
@@ -12092,7 +12288,7 @@ mod tests {
             .get_cloned(&instrument.id())
             .expect("effective instrument");
         let instrument_events = std::iter::from_fn(|| data_rx.try_recv().ok())
-            .filter(|event| matches!(event, DataEvent::Instrument(_)))
+            .filter(|event| matches!(event, DataEvent::Data(NautilusData::Instrument(_))))
             .count();
 
         assert_eq!(effective.price_increment(), Price::from("0.005"));
@@ -12126,7 +12322,7 @@ mod tests {
             .get_cloned(&instrument.id())
             .expect("effective instrument");
         let instrument_events = std::iter::from_fn(|| data_rx.try_recv().ok())
-            .filter(|event| matches!(event, DataEvent::Instrument(_)))
+            .filter(|event| matches!(event, DataEvent::Data(NautilusData::Instrument(_))))
             .count();
 
         assert_eq!(effective.price_increment(), Price::from("0.01"));
@@ -12152,7 +12348,7 @@ mod tests {
             &gamma_instrument,
             |instrument| {
                 ctx.data_sender
-                    .send(DataEvent::Instrument(instrument.clone()))
+                    .send(DataEvent::Data(instrument.clone().into()))
                     .expect("data event receiver");
             },
         ));
@@ -12161,8 +12357,9 @@ mod tests {
             .instruments
             .get_cloned(&gamma_instrument.id())
             .expect("effective instrument");
+
         let published = match data_rx.try_recv().expect("instrument event") {
-            DataEvent::Instrument(instrument) => instrument,
+            DataEvent::Data(NautilusData::Instrument(instrument)) => instrument,
             other => panic!("Expected instrument event, was {other:?}"),
         };
 
@@ -12208,7 +12405,8 @@ mod tests {
         assert_eq!(crate::filters::market_closed(&rebuilt), Some(closed));
 
         let event = data_rx.try_recv().expect("tick size instrument event");
-        let DataEvent::Instrument(published) = event else {
+
+        let DataEvent::Data(NautilusData::Instrument(published)) = event else {
             panic!("Expected instrument event, was {event:?}");
         };
         assert_eq!(published.id(), instrument_id);
@@ -12238,7 +12436,9 @@ mod tests {
         assert!(!ctx.subscriptions.book_sync.book_gated(instrument_id));
         let events: Vec<DataEvent> = std::iter::from_fn(|| data_rx.try_recv().ok()).collect();
         assert!(
-            events.iter().any(|e| matches!(e, DataEvent::Instrument(_))),
+            events
+                .iter()
+                .any(|e| matches!(e, DataEvent::Data(NautilusData::Instrument(_)))),
             "instrument update must still be emitted: {events:?}",
         );
     }
@@ -14145,6 +14345,11 @@ mod tests {
     #[rstest]
     #[tokio::test]
     async fn repeated_unusable_snapshot_requests_one_recovery_episode() {
+        if super::super::test_logging::run_in_isolated_process() {
+            return;
+        }
+
+        let _capture = super::super::test_logging::capture_logs().await;
         let asset_id = "0xTOKEN_EMPTY_LOOP";
         let market = "0xMARKET";
 
@@ -14221,6 +14426,27 @@ mod tests {
             data_rx.try_recv().is_err(),
             "unusable snapshots must not emit Data events"
         );
+
+        let logs = super::super::test_logging::messages();
+        let errors: Vec<_> = logs
+            .iter()
+            .filter(|(level, _)| *level == log::Level::Error)
+            .map(|(_, message)| message.as_str())
+            .collect();
+        let expected_error = format!(
+            "Failed to parse book snapshot for {instrument_id}: Invalid price 'abc': invalid decimal significand"
+        );
+        assert_eq!(
+            errors,
+            vec![expected_error.as_str(), expected_error.as_str()]
+        );
+        assert!(logs.iter().any(|(level, message)| {
+            *level == log::Level::Debug
+                && message
+                    == &format!(
+                        "Resyncing book for {instrument_id} after snapshot application failure"
+                    )
+        }));
     }
 
     fn make_price_change_batch(
@@ -16135,6 +16361,11 @@ mod tests {
     #[rstest]
     #[tokio::test]
     async fn tick_size_change_requests_recovery_and_resubscribes() {
+        if super::super::test_logging::run_in_isolated_process() {
+            return;
+        }
+
+        let _capture = super::super::test_logging::capture_logs().await;
         let (mut ctx, _data_rx) = make_ws_ctx();
         let asset_id = "0xTOKEN_TICK_RECOVER";
         let market = "0xMARKET";
@@ -16179,5 +16410,15 @@ mod tests {
             crate::websocket::handler::HandlerCommand::CycleMarketSubscription { asset_ids: ids, .. }
             if ids == vec![asset_id.to_string()]
         ));
+
+        let logs = super::super::test_logging::messages();
+        assert!(logs.iter().any(|(level, message)| {
+            *level == log::Level::Debug
+                && message == &format!("Resyncing book for {instrument_id} after tick size change")
+        }));
+        assert!(
+            !logs.iter().any(|(level, _)| *level == log::Level::Warn),
+            "Unexpected WARN logs: {logs:?}",
+        );
     }
 }

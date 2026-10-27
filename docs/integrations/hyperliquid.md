@@ -353,7 +353,11 @@ and each unique HIP-3 dex named by the wallet's recent historical orders or fill
 
 The returned mass status records its coverage under the
 [mass-status history contract](../concepts/execution/reconciliation.md#mass-status-history-contract). With a
-configured lookback, `lookback_start` carries its lower bound. Without one, the snapshot is unbounded.
+configured lookback, `lookback_start` carries its lower bound. Complete snapshots without one remain unbounded.
+If either history response reaches its record limit, an unbounded request instead declares the oldest
+raw fill timestamp as its lower bound when raw fills are available. This declaration preserves all valid
+fills and does not claim complete coverage. Without raw fills, no lower bound is declared.
+Unusable rows without a capped response do not add a time bound.
 `reports_complete` is `false` for either of these conditions:
 
 - A history response reached its record limit and may be truncated.
@@ -361,6 +365,11 @@ configured lookback, `lookback_start` carries its lower bound. Without one, the 
 
 Valid rows remain in the report set. Responses that decode cleanly within the record limits form an
 authoritative snapshot, including when empty.
+
+For a declared window, fills without an explicit position report update orders only. This prevents
+truncated history from creating positions, but can leave a cached position open after an offline close
+when flat positions are omitted from the reports. See
+[bounded history safety](../concepts/execution/reconciliation.md#bounded-history-safety).
 
 #### Reduce-only fill quantity
 
@@ -1629,13 +1638,14 @@ Resubscribing to `orderUpdates` and `userEvents` provides no snapshot, so the st
 events. After reconnect, the execution client waits for both subscription confirmations, then reads the
 account's `historicalOrders` followed by `userFills` over REST.
 
-The recovery window starts 30 seconds before the venue time of the last delivered report, or before stream
-start if none has arrived. Recovery processes fills and each venue order's latest status oldest first through
-the stream-update path. New stream updates wait for recovery, so recovered events apply first.
+A reconnect reuses any pending recovery window. Otherwise, it opens a window 30 seconds before the venue
+time of the last delivered report, or before stream start if none has arrived. Recovery processes fills and
+each venue order's latest status oldest first through the stream-update path. New stream updates wait for
+recovery, so recovered events apply first.
 
 History can lag live state by several seconds and omit events just before reconnect. Five seconds after the
-first read, the client rereads the same window through the same path, applying missed events and skipping
-those already applied. Stream updates continue during this second read, so recovered events can arrive
+first read, a follow-up history read covers the same window through the same path, applying missed events
+and skipping those already applied. Stream updates continue during the follow-up, so recovered events can arrive
 after newer updates for the same order. Fills for an order already closed by a newer update reach
 reconciliation as external fill reports.
 
@@ -1654,10 +1664,11 @@ reconciliation as external fill reports.
   the close before the replacement appears therefore cannot end an order the modify replaced.
 - If the venue does not confirm the subscriptions within 10 seconds, the client logs a warning
   and reads the history anyway.
-- If a history request fails, the client logs an error and resumes the stream without the missed
-  events until the second read retries it. If that read fails too, a later reconnect recovers only
-  from the last report the stream has delivered by then, so in-flight checks and, when configured,
-  open-order checks (`open_check_interval_secs`) are the fallback.
+- If a history request fails, the client logs an error and resumes the stream. The recovery window
+  stays pending until the follow-up history read for the latest reconnect succeeds. Later reconnects
+  retry from the same window start, even when the stream delivers newer reports. Until recovery
+  succeeds, in-flight checks and, when configured, open-order checks (`open_check_interval_secs`)
+  are the fallback.
 
 Each history endpoint returns only the account's 2,000 most recent records, so recovery cannot
 reach events older than those.

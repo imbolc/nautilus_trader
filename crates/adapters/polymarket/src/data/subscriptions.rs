@@ -718,9 +718,11 @@ mod tests {
             );
             targets.push((instrument_id, token_id));
         }
+
         *watchlist.write() = entries;
         subscriptions.active_instrument_status_subs =
             Arc::new(targets.iter().map(|(id, _)| *id).collect());
+
         subscriptions.ws_open_tokens = Arc::new(
             targets
                 .iter()

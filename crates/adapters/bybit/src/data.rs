@@ -715,7 +715,9 @@ fn handle_ws_message(
 
                     match parse_ticker_linear_funding(&merged, instrument_id, ts_event, ts_init) {
                         Ok(update) => {
-                            if let Err(e) = data_sender.send(DataEvent::FundingRate(update)) {
+                            if let Err(e) =
+                                data_sender.send(DataEvent::Data(Data::FundingRate(update)))
+                            {
                                 log::error!("Failed to emit funding rate event: {e}");
                             }
                         }
@@ -781,7 +783,9 @@ fn handle_ws_message(
             if option_greeks_subs.contains(&instrument_id) {
                 match parse_ticker_option_greeks(msg, instrument, ts_init) {
                     Ok(greeks) => {
-                        if let Err(e) = data_sender.send(DataEvent::OptionGreeks(greeks)) {
+                        if let Err(e) =
+                            data_sender.send(DataEvent::Data(Data::OptionGreeks(greeks)))
+                        {
                             log::error!("Failed to send option greeks: {e}");
                         }
                     }
@@ -1051,7 +1055,7 @@ impl DataClient for BybitDataClient {
         }
 
         for instrument in all_instruments {
-            if let Err(e) = self.data_sender.send(DataEvent::Instrument(instrument)) {
+            if let Err(e) = self.data_sender.send(DataEvent::Data(instrument.into())) {
                 log::warn!("Failed to send instrument: {e}");
             }
         }
@@ -1959,10 +1963,11 @@ impl DataClient for BybitDataClient {
     }
 
     fn request_instrument(&self, request: RequestInstrument) -> anyhow::Result<()> {
+        let instrument_id = request.single_instrument_id()?;
+
         let http = self.http_client.clone();
         let sender = self.data_sender.clone();
         let instruments = self.instruments.clone();
-        let instrument_id = request.instrument_id;
         let request_id = request.request_id;
         let client_id = request.client_id.unwrap_or(self.client_id);
         let start = request.start;
@@ -2013,9 +2018,10 @@ impl DataClient for BybitDataClient {
     }
 
     fn request_book_snapshot(&self, request: RequestBookSnapshot) -> anyhow::Result<()> {
+        let instrument_id = request.single_instrument_id()?;
+
         let http = self.http_client.clone();
         let sender = self.data_sender.clone();
-        let instrument_id = request.instrument_id;
         let depth = request.depth.map(|n| n.get() as u32);
         let request_id = request.request_id;
         let client_id = request.client_id.unwrap_or(self.client_id);
@@ -2061,9 +2067,10 @@ impl DataClient for BybitDataClient {
     }
 
     fn request_trades(&self, request: RequestTrades) -> anyhow::Result<()> {
+        let instrument_id = request.single_instrument_id()?;
+
         let http = self.http_client.clone();
         let sender = self.data_sender.clone();
-        let instrument_id = request.instrument_id;
         let start = request.start;
         let end = request.end;
         let limit = request.limit.map(|n| n.get() as u32);
@@ -2107,10 +2114,11 @@ impl DataClient for BybitDataClient {
     }
 
     fn request_bars(&self, request: RequestBars) -> anyhow::Result<()> {
+        let bar_type = request.single_bar_type()?;
+
         let http = self.http_client.clone();
         let bars_timestamp_on_close = self.config.bars_timestamp_on_close;
         let sender = self.data_sender.clone();
-        let bar_type = request.bar_type;
         let start = request.start;
         let end = request.end;
         let limit = request.limit.map(|n| n.get() as u32);
@@ -2162,9 +2170,10 @@ impl DataClient for BybitDataClient {
     }
 
     fn request_funding_rates(&self, request: RequestFundingRates) -> anyhow::Result<()> {
+        let instrument_id = request.single_instrument_id()?;
+
         let http = self.http_client.clone();
         let sender = self.data_sender.clone();
-        let instrument_id = request.instrument_id;
         let start = request.start;
         let end = request.end;
         let limit = request.limit.map(|n| n.get() as u32);
@@ -3620,7 +3629,7 @@ pub(crate) mod tests {
         );
 
         let event = rx.try_recv().unwrap();
-        assert!(matches!(event, DataEvent::FundingRate(_)));
+        assert!(matches!(event, DataEvent::Data(Data::FundingRate(_))));
 
         // Send same message again, funding unchanged so should be deduped
         let ws_msg2 = BybitWsMessage::TickerLinear(msg);
@@ -3916,7 +3925,7 @@ pub(crate) mod tests {
         );
 
         let event = rx.try_recv().unwrap();
-        assert!(matches!(event, DataEvent::OptionGreeks(_)));
+        assert!(matches!(event, DataEvent::Data(Data::OptionGreeks(_))));
     }
 
     #[rstest]

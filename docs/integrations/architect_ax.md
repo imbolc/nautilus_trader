@@ -197,8 +197,9 @@ frames (`st: false`) to avoid clearing unchanged book levels.
 
 :::note
 AX publishes no trade identifier for market data. Thus, the adapter derives `TradeTick.trade_id` from the
-trade's timestamp, price, size, and aggressor side. REST and WebSocket agree on the same trade whenever both
-report its aggressor side. Prints that AX reports identically share an ID. This affects only consumers that
+trade's timestamp, price, size, and aggressor side. The adapter rejects REST and WebSocket trades with a
+missing or invalid aggressor side, so the same print has the same ID across transports. Prints that AX
+reports identically share an ID. This affects only consumers that
 deduplicate market data on `trade_id`, because fills carry the venue's own trade IDs.
 :::
 
@@ -709,8 +710,13 @@ credentials are valid and have trading permissions.
   order-status requests that need fills, and mass status. During startup, that error prevents the node
   from starting.
 - **Fill reconciliation window**: The `/fills` endpoint requires a bounded time range and caps the span at
-  seven days. Reconciliation uses seven days by default, or the shorter configured lookback. Fills older
-  than the applied window are not reconciled.
+  seven days. Fill requests cover seven days by default, or the shorter configured lookback. Order history
+  uses the configured lookback and has no start bound by default.
+
+  Older order reports can still produce inferred fills with `commission=None`. Order history does not
+  supply fees, and the adapter does not estimate historical fees from current account rates. Position
+  accounting excludes unavailable fees, so reconstructed PnL for that history is incomplete. A reported
+  zero fee remains a zero commission.
 - **Fill order identity**: AX can omit `order_id` for block trades and final settlement fills. The
   adapter derives a deterministic reconciliation order ID from `trade_id` for those classified
   records and includes a matching `FILLED` market order report in startup mass status. Classification

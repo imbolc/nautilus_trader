@@ -461,7 +461,7 @@ impl BinanceFuturesDataClient {
         }
 
         for instrument in &instruments {
-            if let Err(e) = sender.send(DataEvent::Instrument(instrument.clone())) {
+            if let Err(e) = sender.send(DataEvent::Data(instrument.clone().into())) {
                 log::warn!("Failed to send refreshed Binance Futures instrument: {e}");
             }
         }
@@ -781,7 +781,9 @@ impl BinanceFuturesDataClient {
                         Ok((mark_update, index_update, funding_update, custom_update)) => {
                             Self::send_data(data_sender, Data::MarkPrice(mark_update));
                             Self::send_data(data_sender, Data::IndexPrice(index_update));
-                            if let Err(e) = data_sender.send(DataEvent::FundingRate(funding_update))
+
+                            if let Err(e) =
+                                data_sender.send(DataEvent::Data(Data::FundingRate(funding_update)))
                             {
                                 log::error!("Failed to emit funding rate: {e}");
                             }
@@ -2351,7 +2353,7 @@ impl DataClient for BinanceFuturesDataClient {
         let http = self.http_client.clone();
         let sender = self.data_sender.clone();
         let instruments = self.instruments.clone();
-        let instrument_id = request.instrument_id;
+        let instrument_id = request.single_instrument_id()?;
         let request_id = request.request_id;
         let client_id = request.client_id.unwrap_or(self.client_id);
         let start = request.start;
@@ -2674,7 +2676,7 @@ impl DataClient for BinanceFuturesDataClient {
     fn request_trades(&self, request: RequestTrades) -> anyhow::Result<()> {
         let http = self.http_client.clone();
         let sender = self.data_sender.clone();
-        let instrument_id = request.instrument_id;
+        let instrument_id = request.single_instrument_id()?;
         let limit = request.limit.map(|n| n.get() as u32);
         let request_id = request.request_id;
         let client_id = request.client_id.unwrap_or(self.client_id);
@@ -2724,7 +2726,7 @@ impl DataClient for BinanceFuturesDataClient {
     fn request_funding_rates(&self, request: RequestFundingRates) -> anyhow::Result<()> {
         let http = self.http_client.clone();
         let sender = self.data_sender.clone();
-        let instrument_id = request.instrument_id;
+        let instrument_id = request.single_instrument_id()?;
         let start = request.start;
         let end = request.end;
         let limit = request.limit.map(|n| n.get() as u32);
@@ -2767,7 +2769,7 @@ impl DataClient for BinanceFuturesDataClient {
     fn request_bars(&self, request: RequestBars) -> anyhow::Result<()> {
         let http = self.http_client.clone();
         let sender = self.data_sender.clone();
-        let bar_type = request.bar_type;
+        let bar_type = request.single_bar_type()?;
         let start = request.start;
         let end = request.end;
         let limit = request.limit.map(|n| n.get() as u32);
@@ -2826,7 +2828,7 @@ impl DataClient for BinanceFuturesDataClient {
         let http = self.http_client.clone();
         let book_sync = self.book_sync.clone();
         let sender = self.data_sender.clone();
-        let instrument_id = request.instrument_id;
+        let instrument_id = request.single_instrument_id()?;
         let request_id = request.request_id;
         let client_id = request.client_id.unwrap_or(self.client_id);
         let params = request.params;

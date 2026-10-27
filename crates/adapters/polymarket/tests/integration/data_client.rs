@@ -762,11 +762,11 @@ async fn test_request_instrument_fetches_fresh_definition() {
 
     let publish_count = events
         .iter()
-        .filter(|e| matches!(e, DataEvent::Instrument(_)))
+        .filter(|e| matches!(e, DataEvent::Data(NautilusData::Instrument(_))))
         .count();
     assert_eq!(
         publish_count, 1,
-        "request_instrument must publish exactly one DataEvent::Instrument; events were: {events:?}"
+        "request_instrument must publish exactly one DataEvent::Data(NautilusData::Instrument(...)); events were: {events:?}"
     );
 
     let response_count = events
@@ -850,7 +850,7 @@ async fn test_subscribe_instrument_does_not_replay_cached_definition() {
     assert_eq!(
         prime_events
             .iter()
-            .filter(|event| matches!(event, DataEvent::Instrument(_)))
+            .filter(|event| matches!(event, DataEvent::Data(NautilusData::Instrument(_))))
             .count(),
         1,
     );
@@ -1042,7 +1042,7 @@ async fn test_request_instruments_emits_response() {
 
     let publish_count = events
         .iter()
-        .filter(|e| matches!(e, DataEvent::Instrument(_)))
+        .filter(|e| matches!(e, DataEvent::Data(NautilusData::Instrument(_))))
         .count();
     assert_eq!(
         publish_count, 0,
@@ -1212,7 +1212,8 @@ async fn test_request_trades_returns_trades_response() {
         .unwrap_or_else(|| panic!("expected DataResponse::Trades; events were: {events:?}"));
 
     assert_eq!(
-        trades_response.instrument_id, instrument_id,
+        trades_response.instrument_ids,
+        vec![instrument_id],
         "response must carry the requested instrument_id",
     );
     assert_eq!(
@@ -1360,7 +1361,7 @@ async fn test_request_trades_emits_one_empty_response_for_empty_result() {
         1,
         "an empty Data API result must emit exactly one correlated trades response; events were: {events:?}",
     );
-    assert_eq!(trades_responses[0].instrument_id, instrument_id);
+    assert_eq!(trades_responses[0].instrument_ids, vec![instrument_id]);
     assert!(trades_responses[0].data.is_empty());
 }
 

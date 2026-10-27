@@ -385,7 +385,7 @@ impl AsyncRunner {
             // Events drain before commands here even though the runtime select
             // prefers the opposite for everything-else: `LiveNode::start()`
             // calls this after `connect_data_clients()` to push queued
-            // `DataEvent::Instrument` items into the cache. A pending
+            // instrument definitions into the cache. A pending
             // subscription command (e.g. `SubscribeBars`) processed before the
             // matching instrument lands would be rejected by the data engine.
             while let Ok(evt) = self.channels.data_evt_rx.try_recv() {
@@ -547,20 +547,14 @@ impl AsyncRunner {
             DataEvent::Data(data) => {
                 msgbus::send_data(MessagingSwitchboard::data_engine_process_data(), data);
             }
-            DataEvent::Instrument(data) => {
-                msgbus::send_any(MessagingSwitchboard::data_engine_process(), &data);
+            DataEvent::ResponseEnvelope(response) => {
+                msgbus::send_any(MessagingSwitchboard::data_engine_process(), &response);
+            }
+            DataEvent::RequestFailed(failure) => {
+                msgbus::send_any(MessagingSwitchboard::data_engine_process(), &failure);
             }
             DataEvent::Response(resp) => {
                 msgbus::send_data_response(MessagingSwitchboard::data_engine_response(), resp);
-            }
-            DataEvent::FundingRate(funding_rate) => {
-                msgbus::send_any(MessagingSwitchboard::data_engine_process(), &funding_rate);
-            }
-            DataEvent::InstrumentStatus(status) => {
-                msgbus::send_any(MessagingSwitchboard::data_engine_process(), &status);
-            }
-            DataEvent::OptionGreeks(greeks) => {
-                msgbus::send_any(MessagingSwitchboard::data_engine_process(), &greeks);
             }
             #[cfg(feature = "defi")]
             DataEvent::DeFi(data) => {
@@ -815,7 +809,10 @@ mod tests {
     use nautilus_core::{UUID4, UnixNanos};
     use nautilus_execution::engine::ExecutionEngine;
     use nautilus_model::{
-        data::{Data, DataType, quote::QuoteTick},
+        data::{
+            Data, DataType, FundingRateUpdate, InstrumentStatus, OptionGreeks, quote::QuoteTick,
+            stubs::stub_instrument_status,
+        },
         enums::{
             AccountType, LiquiditySide, OrderSide, OrderStatus, OrderType, PositionSide,
             TimeInForce,
@@ -829,6 +826,7 @@ mod tests {
             AccountId, ClientId, ClientOrderId, InstrumentId, PositionId, StrategyId, TradeId,
             TraderId, Venue, VenueOrderId,
         },
+        instruments::{InstrumentAny, stubs::crypto_perpetual_ethusdt},
         reports::{FillReport, OrderStatusReport, PositionStatusReport},
         types::{Money, Price, Quantity},
     };
@@ -836,6 +834,58 @@ mod tests {
     use ustr::Ustr;
 
     use super::*;
+
+    #[rstest]
+    fn test_runner_dispatches_typed_data_once_in_order() {
+        let mut runner = AsyncRunner::new();
+        let expected = vec![
+            Data::from(InstrumentAny::CryptoPerpetual(crypto_perpetual_ethusdt())),
+            Data::FundingRate(FundingRateUpdate::new(
+                InstrumentId::from("ETHUSDT.BINANCE"),
+                "0.00012".parse().unwrap(),
+                Some(480),
+                Some(UnixNanos::from(300)),
+                UnixNanos::from(100),
+                UnixNanos::from(200),
+            )),
+            Data::InstrumentStatus(InstrumentStatus {
+                ts_event: UnixNanos::from(400),
+                ts_init: UnixNanos::from(500),
+                ..stub_instrument_status()
+            }),
+            Data::OptionGreeks(OptionGreeks {
+                instrument_id: InstrumentId::from("BTC-20270101-50000-C.DERIBIT"),
+                mark_iv: Some(0.55),
+                bid_iv: Some(0.54),
+                ask_iv: Some(0.56),
+                underlying_price: Some(50001.0),
+                open_interest: Some(123.0),
+                ts_event: UnixNanos::from(600),
+                ts_init: UnixNanos::from(700),
+                ..OptionGreeks::default()
+            }),
+        ];
+        let received = Rc::new(RefCell::new(Vec::<Data>::new()));
+        let observed = received.clone();
+        msgbus::register_data_endpoint(
+            MessagingSwitchboard::data_engine_process_data(),
+            TypedIntoHandler::from(move |data| observed.borrow_mut().push(data)),
+        );
+
+        for data in &expected {
+            runner
+                .data_evt_tx
+                .send(DataEvent::Data(data.clone()).into())
+                .unwrap();
+        }
+
+        runner.flush_pending_data();
+
+        assert_eq!(
+            serde_json::to_value(&*received.borrow()).unwrap(),
+            serde_json::to_value(&expected).unwrap(),
+        );
+    }
 
     #[rstest]
     #[case(false)]
@@ -2499,6 +2549,206 @@ mod tests {
             }
             _ => panic!("Expected AccountState"),
         }
+    }
+
+    #[cfg(feature = "node")]
+    #[rstest]
+    #[case::cash(AccountType::Cash)]
+    #[case::margin(AccountType::Margin)]
+    fn test_account_event_publishes_after_portfolio_application(#[case] account_type: AccountType) {
+        use nautilus_common::msgbus::{MessageBus, TypedHandler};
+        use nautilus_model::{
+            accounts::Account,
+            types::{AccountBalance, Currency},
+        };
+        use nautilus_portfolio::Portfolio;
+
+        // Native logging tests use nextest's per-test process isolation.
+        struct AccountLogCapture(std::sync::Mutex<Vec<String>>);
+
+        impl log::Log for AccountLogCapture {
+            fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+                metadata.level() == log::Level::Info
+                    && metadata.target() == "nautilus_portfolio::portfolio"
+            }
+
+            fn log(&self, record: &log::Record<'_>) {
+                if self.enabled(record.metadata()) {
+                    self.0.lock().unwrap().push(record.args().to_string());
+                }
+            }
+
+            fn flush(&self) {}
+        }
+
+        static LOGS: AccountLogCapture = AccountLogCapture(std::sync::Mutex::new(Vec::new()));
+        log::set_logger(&LOGS).unwrap();
+        log::set_max_level(log::LevelFilter::Info);
+
+        msgbus::set_message_bus(Rc::new(RefCell::new(MessageBus::new(
+            TraderId::from("TESTER-001"),
+            UUID4::new(),
+            None,
+            None,
+        ))));
+        let cache = Rc::new(RefCell::new(Cache::default()));
+        let clock = Rc::new(RefCell::new(VirtualClock::new()));
+        let _portfolio = Portfolio::new(clock, cache.clone(), None);
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let received = observed.clone();
+        let source = cache.clone();
+        let handler = TypedHandler::from(move |event: &AccountState| {
+            let cache = source.borrow();
+            let account = cache.account(&event.account_id).unwrap();
+            assert_eq!(account.last_event().unwrap().event_id, event.event_id);
+            assert_eq!(account.account_type(), event.account_type);
+            assert_eq!(
+                account.balances().into_values().collect::<Vec<_>>(),
+                event.balances
+            );
+            received
+                .borrow_mut()
+                .push((event.event_id, account.events().len()));
+        });
+
+        // Subscribers must see applied state regardless of their topic priority
+        msgbus::subscribe_account_state("events.account.*".into(), handler.clone(), Some(20));
+        let scoped = Rc::new(RefCell::new(Vec::new()));
+        let scoped_received = scoped.clone();
+        let scoped_handler = TypedHandler::from(move |event: &AccountState| {
+            scoped_received.borrow_mut().push(event.event_id);
+        });
+        msgbus::subscribe_account_state(
+            "events.account.SIM-001".into(),
+            scoped_handler.clone(),
+            None,
+        );
+        let mut expected = Vec::new();
+        let mut expected_scoped = Vec::new();
+        for (index, (account_id, total, locked, free, history_len)) in [
+            ("SIM-001", "100 USD", "20 USD", "80 USD", 1),
+            ("SIM-002", "200 USD", "50 USD", "150 USD", 1),
+            ("SIM-001", "90 USD", "10 USD", "80 USD", 2),
+            ("SIM-001", "0 USD", "0 USD", "0 USD", 3),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let event = AccountState::new(
+                AccountId::from(account_id),
+                account_type,
+                vec![AccountBalance::new(
+                    Money::from(total),
+                    Money::from(locked),
+                    Money::from(free),
+                )],
+                vec![],
+                true,
+                UUID4::new(),
+                UnixNanos::from(index as u64 + 1),
+                UnixNanos::from(index as u64 + 1),
+                Some(Currency::USD()),
+            );
+            expected.push((event.event_id, history_len));
+            if account_id == "SIM-001" {
+                expected_scoped.push(event.event_id);
+            }
+            let expected_log = format!("Updated {event}");
+            AsyncRunner::handle_exec_event(ExecutionEvent::Account(event));
+            assert_eq!(
+                LOGS.0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|line| **line == expected_log)
+                    .count(),
+                1
+            );
+        }
+        assert_eq!(*observed.borrow(), expected);
+        assert_eq!(*scoped.borrow(), expected_scoped);
+        let cache = cache.borrow();
+        assert_eq!(
+            cache
+                .account(&AccountId::from("SIM-001"))
+                .unwrap()
+                .events()
+                .len(),
+            3
+        );
+        assert_eq!(
+            cache
+                .account(&AccountId::from("SIM-002"))
+                .unwrap()
+                .events()
+                .len(),
+            1
+        );
+        msgbus::unsubscribe_account_state("events.account.*".into(), &handler);
+        msgbus::unsubscribe_account_state("events.account.SIM-001".into(), &scoped_handler);
+    }
+
+    #[cfg(feature = "node")]
+    #[rstest]
+    #[case::cash_update(AccountType::Cash, true)]
+    #[case::wallet_initial(AccountType::Wallet, false)]
+    #[case::wallet_update(AccountType::Wallet, true)]
+    fn test_rejected_account_event_is_not_published(
+        #[case] account_type: AccountType,
+        #[case] existing_account: bool,
+    ) {
+        use nautilus_common::msgbus::{MessageBus, TypedHandler};
+        use nautilus_model::types::{AccountBalance, Currency};
+        use nautilus_portfolio::Portfolio;
+
+        msgbus::set_message_bus(Rc::new(RefCell::new(MessageBus::default())));
+        let cache = Rc::new(RefCell::new(Cache::default()));
+        let mut portfolio = Portfolio::new(
+            Rc::new(RefCell::new(VirtualClock::new())),
+            cache.clone(),
+            None,
+        );
+        let state = |amount: &str| {
+            AccountState::new(
+                AccountId::from("SIM-001"),
+                account_type,
+                vec![AccountBalance::new(
+                    Money::from(amount),
+                    Money::zero(Currency::USD()),
+                    Money::from(amount),
+                )],
+                vec![],
+                true,
+                UUID4::new(),
+                UnixNanos::from(1),
+                UnixNanos::from(1),
+                (account_type != AccountType::Wallet).then_some(Currency::USD()),
+            )
+        };
+        let initial = state("100.00 USD");
+
+        if existing_account {
+            portfolio.update_account(&initial);
+        }
+        let received = Rc::new(RefCell::new(Vec::new()));
+        let handler = TypedHandler::from({
+            let received = received.clone();
+            move |event: &AccountState| received.borrow_mut().push(event.clone())
+        });
+        msgbus::subscribe_account_state("events.account.*".into(), handler.clone(), None);
+        AsyncRunner::handle_exec_event(ExecutionEvent::Account(state("-1.00 USD")));
+        assert!(received.borrow().is_empty());
+        let cache = cache.borrow();
+
+        if existing_account {
+            assert_eq!(
+                cache.account(&initial.account_id).unwrap().last_event(),
+                Some(initial)
+            );
+        } else {
+            assert!(cache.account(&initial.account_id).is_none());
+        }
+        msgbus::unsubscribe_account_state("events.account.*".into(), &handler);
     }
 
     #[tokio::test]

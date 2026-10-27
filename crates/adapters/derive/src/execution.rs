@@ -482,7 +482,7 @@ impl DeriveExecutionClient {
             let sender = try_get_data_event_sender()
                 .context("Derive instrument event sender is unavailable")?;
             sender
-                .send(DataEvent::Instrument(instrument))
+                .send(DataEvent::Data(instrument.into()))
                 .map_err(|e| {
                     anyhow::anyhow!("Failed to publish required Derive instrument {id}: {e}")
                 })?;
@@ -549,7 +549,7 @@ impl DeriveExecutionClient {
         }
     }
 
-    fn validate_order(&self, order: &OrderAny) -> Result<(), OrderDeniedReason> {
+    fn validate_order(&self, order: &OrderAny) -> anyhow::Result<()> {
         if is_derive_trigger_order_type(order.order_type()) {
             validate_trigger_order_support(order)?;
         } else {
@@ -564,12 +564,12 @@ impl DeriveExecutionClient {
                 Some(InstrumentAny::CurrencyPair(_))
             )
         {
-            return Err(OrderDeniedReason::UnsupportedReduceOnly);
+            anyhow::bail!(OrderDeniedReason::UnsupportedReduceOnly);
         }
 
         if order.order_type() == OrderType::Market && cache.quote(&order.instrument_id()).is_none()
         {
-            return Err(OrderDeniedReason::MarketPriceUnavailable {
+            anyhow::bail!(OrderDeniedReason::MarketPriceUnavailable {
                 order_type: order.order_type(),
                 instrument_id: order.instrument_id(),
             });
@@ -1620,6 +1620,24 @@ impl ExecutionClient for DeriveExecutionClient {
 
     fn submit_order_list(&self, cmd: SubmitOrderList) -> anyhow::Result<()> {
         let orders = self.core.get_orders_for_list(&cmd.order_list)?;
+
+        if orders.iter().any(|order| {
+            order.is_contingency()
+                || order.is_child_order()
+                || order.linked_order_ids().is_some_and(|ids| !ids.is_empty())
+        }) {
+            let reason = OrderDeniedReason::UnsupportedOrderList {
+                detail: "Derive does not support native contingent order lists".to_string(),
+            }
+            .to_string();
+
+            for order in &orders {
+                self.emitter.emit_order_denied(order, &reason);
+            }
+
+            return Ok(());
+        }
+
         let denials: Vec<_> = orders
             .iter()
             .map(|order| self.validate_order(order).err())
@@ -1627,8 +1645,11 @@ impl ExecutionClient for DeriveExecutionClient {
 
         if denials.iter().any(Option::is_some) {
             for (order, denial) in orders.iter().zip(denials) {
-                let reason = denial.unwrap_or(OrderDeniedReason::OrderListDenied {
-                    order_list_id: cmd.order_list.id,
+                let reason = denial.unwrap_or_else(|| {
+                    OrderDeniedReason::OrderListDenied {
+                        order_list_id: cmd.order_list.id,
+                    }
+                    .into()
                 });
 
                 self.emitter.emit_order_denied(order, &reason.to_string());
