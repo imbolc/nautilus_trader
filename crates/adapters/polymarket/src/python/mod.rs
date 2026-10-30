@@ -58,7 +58,6 @@ use crate::{
     },
     factories::{PolymarketDataClientFactory, PolymarketExecutionClientFactory},
     models::PolymarketFeeModel,
-    providers::build_gamma_params_from_hashmap,
 };
 
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
@@ -216,10 +215,7 @@ pub(super) fn extract_string_map(
 }
 
 fn validate_provider_config(config: &PolymarketInstrumentProviderConfig) -> PyResult<()> {
-    if let Some(filters) = config.filters.as_ref() {
-        build_gamma_params_from_hashmap(filters)
-            .map_err(|e| to_pyvalue_err(format!("Invalid Polymarket Gamma filters: {e}")))?;
-    }
+    config.validate().map_err(to_pyvalue_err)?;
     Ok(())
 }
 

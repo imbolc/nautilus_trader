@@ -20,6 +20,8 @@ use std::time::Duration;
 use nautilus_network::retry::RetryConfig;
 use rand::RngExt;
 
+pub(crate) const AUTO_LOAD_RETRY_JITTER_FRACTION: f64 = 0.25;
+
 /// Returns HTTP retry defaults with attempt timeouts enforced by the HTTP client.
 pub(crate) fn http_retry_config() -> RetryConfig {
     RetryConfig {
@@ -57,7 +59,7 @@ pub(crate) fn auto_load_retry_delay_with_jitter(
     let max = max_secs.max(base);
     let raw = base * 2f64.powi(attempt.min(30) as i32);
     let capped = raw.min(max);
-    let total = capped + capped * 0.25 * jitter_unit.clamp(0.0, 1.0);
+    let total = capped + capped * AUTO_LOAD_RETRY_JITTER_FRACTION * jitter_unit.clamp(0.0, 1.0);
     Duration::from_secs_f64(total.max(0.0))
 }
 

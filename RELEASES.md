@@ -1,3 +1,73 @@
+# NautilusTrader 2.0.0rc9
+
+Released on TBD (UTC).
+
+### Enhancements
+
+- Added `HttpClient` certificate support through `certs_dir`
+- Added Betfair certificate login through `certs_dir`
+- Added Deribit routed spot metadata and local order and market data capability checks
+
+### Breaking Changes
+
+- Changed `CacheDatabaseAdapter` Greek and yield-curve defaults to errors; override supported reads and writes
+- Changed `Cache::cache_all` to replace preloaded Greeks and yield curves; add transient values after loading
+- Changed Postgres cache startup to require `greeks` and `yield_curve` tables; run `nautilus database init`
+- Changed Redis Greek and yield-curve writes to fail; disable `save_market_data` or use Postgres
+- Changed Bybit HTTP `modify_order` to take `trigger_price`; pass `None` when unchanged
+- Changed Databento and Interactive Brokers futures year settings to `FuturesYearDigits`; Python keeps `1`/`2`
+- Changed Databento futures IDs to two-digit years by default; `futures_year_digits=1` keeps old IDs, thanks @faysou
+- Changed Databento futures-option IDs and underlyings to match `futures_year_digits`
+- Changed Databento and Interactive Brokers catalog/cache IDs; rebuild stored data when adopting two-digit years
+- Changed Databento definition decoders to preserve native `raw_symbol`; supply `msg.raw_symbol`
+- Changed Databento `decode_nautilus_instrument_id`; pass year mode, definitions, and optional request hints
+- Changed Databento `get_nautilus_instrument_id_for_record`; pass year mode, definitions, venues, and request hints
+- Changed Deribit orders to require cached instruments; include traded product types in execution `product_types`
+- Changed Deribit spot orders to reject `GTD`; use `GTC`, `IOC`, or `FOK`
+- Changed `DeribitInstrument` literals; add `is_cbe_routed: None` and `is_csr: None`
+- Changed Derive endpoint overrides to `SecretString`; pass strings to builders or use `.into()` in struct literals
+- Changed Interactive Brokers futures IDs to two-digit years by default; use `futures_year_digits=1`, thanks @faysou
+- Changed Interactive Brokers futures-option IDs and underlyings to match `futures_year_digits`
+- Changed Interactive Brokers provider config literals; add `futures_year_digits: FuturesYearDigits::Two`
+- Changed Polymarket data/execution credentials and funders to reject blanks; omit them for environment fallback
+- Changed Polymarket execution examples to dry run by default; disable `DRY_RUN` for live orders
+
+### Security
+
+- Improved R2 publishing credential handling to avoid writing keys to disk
+- Fixed Derive configs and HTTP client exposing endpoint credentials in `Debug` output
+
+### Fixes
+
+- Fixed `Cache` indexing closed positions as open and excluding them from purging after insertion
+- Fixed mixed-key market data batches being cached under the first row's instrument or bar type
+- Fixed Postgres cache not persisting or restoring Greeks and yield curves with `save_market_data`
+- Fixed Binance Futures instrument `ts_event` and `ts_init` defaulting to zero
+- Fixed Bybit execution client omitting trigger prices from HTTP and WebSocket amendments
+- Fixed Deribit instrument loading panicking on invalid spot definitions
+- Fixed OKX order commands rejected before being written during WebSocket reconnects
+- Fixed OKX repeated logins preventing authentication recovery after interrupted reconnects
+- Fixed Kraken Futures order-update cancellations closing tracked orders before their fills arrive
+- Fixed Polymarket accepting invalid funders, malformed `load_ids`, and unsafe retry delays
+- Fixed Polymarket explicit event slugs being ignored when an event-slug builder is configured
+- Fixed Polymarket data-client builder defaults disabling the 60-minute instrument refresh
+
+### Internal Improvements
+
+- Improved Docker publishing with temporary digest directories isolated per job
+- Refined Polymarket limit submit responses and venue order ID lookup
+- Standardized module ordering checks to place unconditional modules before cfg-gated modules
+- Upgraded `socket-cli` tool to v1.10.1
+- Upgraded `hypersync-client` crate to v2.0.0
+- Upgraded `ty` package (dev) to v0.0.90
+
+### Documentation Updates
+
+- Improved Polymarket setup and configuration troubleshooting guidance
+- Updated Python Polymarket examples with scoped reconciliation, risk checks, and 30-second shutdown waits
+
+---
+
 # NautilusTrader 2.0.0rc8
 
 Released on 28th October 2026 (UTC).
