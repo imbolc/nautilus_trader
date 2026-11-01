@@ -1370,6 +1370,16 @@ lifts the report gate.
 On connect, the adapter rebuilds applied fills and voids from the cached order events, so a replayed
 trade does not produce a second fill. Those rebuilt fills are not read again.
 
+#### Unbound fills
+
+Maker fills reconstructed from reconciliation reports can lack the original venue trade ID: their
+composite leg IDs are not reversible. The adapter retains their observed application state as unbound
+legs until a validated user WebSocket trade update or targeted terminal REST result matches the leg IDs.
+A missing venue trade ID alone does not fault or disconnect the client.
+
+Retaining an unbound leg does not establish venue settlement or authorize another fill or void. The
+normal settlement and fault rules apply when venue evidence arrives.
+
 #### Settlement faults
 
 A trade enters a hard fault when its venue outcome and the engine's state cannot be reconciled:
@@ -1386,6 +1396,8 @@ A hard-faulted trade admits no further fills or voids, except the one void owed 
 after REST reported `FAILED`. The adapter logs the fault at error level, refreshes the account, and
 blocks reconciliation for the trade (see [settlement precedence](#settlement-precedence)) until the
 client resets or the node restarts.
+
+The adapter publishes no dedicated quarantine or settlement-fault event or metric.
 
 ##### Submissions
 
@@ -1407,9 +1419,10 @@ expiry, or rejection that the venue reports still applies. One inferred from a `
 
 ##### Settlement records
 
-The adapter keeps settlement records for the lifetime of the execution client. If more than 100,000
-records accumulate after connect, the client faults closed: it reports disconnected and refuses new
-commands until restart. Records rebuilt from the cache on connect do not count toward this limit.
+The adapter keeps settlement records and unbound legs for the lifetime of the execution client. Adding
+an entry beyond the combined limit of 100,000 entries after connect faults the client closed: it reports
+disconnected and refuses new commands until restart. Entries rebuilt from the cache on connect do not
+count toward this limit.
 
 ### Trade ID derivation
 
@@ -3110,15 +3123,17 @@ three retries with backoff doubling from 1 to 10 seconds and up to 1 second of j
 bounds each attempt (default 60 seconds); all attempts and waits share a 180-second budget. The node's
 startup connection timeout can end a request earlier.
 
-For HTTP 429 and 503, `Retry-After` sets the minimum delay, which can exceed `retry_delay_max_ms`.
-Slug batches honor the latest retry deadline across failed requests.
+For retryable HTTP responses, `Retry-After` sets the minimum delay, which can exceed
+`retry_delay_max_ms`. Each request in a slug batch honors its own retry hint; indexing retries do not
+repeat exhausted HTTP requests.
 If the required delay exceeds the remaining budget, the request returns the venue error without waiting.
 Permanent errors such as HTTP 400 or 401 fail without retry. A failed page is retried with the same cursor,
 retaining completed pages in memory; exhausting retries does not retain progress for a later invocation.
 
 Raw Gamma clients and `PolymarketDataLoader` Gamma requests use the same retry defaults with their
 supplied request timeout (`timeout_secs` defaults to 10 seconds in the Python loader). A custom
-`RetryConfig` supplied to the Rust `PolymarketGammaHttpClient` is honored.
+`RetryConfig` supplied to the Rust `PolymarketGammaHttpClient` constructor controls indexing-lag
+retries. Use `with_http_retry_config` to override HTTP retries independently.
 
 ##### Market keyset fields
 

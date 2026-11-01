@@ -28,6 +28,7 @@ use nautilus_model::{
     enums::{AccountType, OmsType},
     identifiers::{ClientId, TraderId},
 };
+use nautilus_network::retry::RetryConfig;
 #[cfg(test)]
 use nautilus_network::websocket::proxy::ProxyUrl;
 
@@ -105,9 +106,19 @@ impl PolymarketDataClientFactory {
         let gamma_client = PolymarketGammaHttpClient::new_with_proxy(
             Some(polymarket_config.gamma_url()),
             polymarket_config.http_timeout_secs,
-            polymarket_config.retry_config(),
+            RetryConfig {
+                max_retries: 10,
+                initial_delay_ms: 5_000,
+                max_delay_ms: 30_000,
+                backoff_factor: 1.5,
+                jitter_ms: 2_000,
+                operation_timeout_ms: None,
+                immediate_first: true,
+                max_elapsed_ms: Some(300_000),
+            },
             proxy_url.clone(),
-        )?;
+        )?
+        .with_http_retry_config(polymarket_config.retry_config());
 
         let clob_public_client = PolymarketClobPublicClient::new_with_proxy(
             polymarket_config.base_url_http.clone(),
@@ -242,16 +253,17 @@ pub(crate) async fn spawn_rejecting_proxy(
                     break;
                 }
             }
-            captured
-                .lock()
-                .await
-                .push(String::from_utf8(request).unwrap());
+            // Keep the request log locked until the client consumes the CONNECT rejection
+            let mut captured = captured.lock().await;
+            captured.push(String::from_utf8(request).unwrap());
             stream
                 .write_all(
                     b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n",
                 )
                 .await
                 .unwrap();
+
+            let _ = stream.read(&mut chunk).await;
         }
     });
 
@@ -276,6 +288,7 @@ mod tests {
         factories::{ClientConfig, DataClientFactory, ExecutionClientFactory},
         live::runner::replace_data_event_sender,
         messages::DataEvent,
+        testing::wait_until_async,
     };
     use rstest::rstest;
 
@@ -506,7 +519,7 @@ mod tests {
     async fn data_factory_propagates_configured_proxy() {
         const USERNAME: &str = "proxytest";
         const SECRET: &str = "http-client-proxy-secret";
-        let (proxy_addr, requests) = spawn_rejecting_proxy(3).await;
+        let (proxy_addr, requests) = spawn_rejecting_proxy(6).await;
         let proxy_url = format!("http://{USERNAME}:{SECRET}@{proxy_addr}");
         let (data_tx, _data_rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
         replace_data_event_sender(data_tx);
@@ -518,17 +531,32 @@ mod tests {
             base_url_reference_prices: Some("wss://polybolt.fixture/ws".to_string()),
             proxy_url: Some(proxy_url.clone().into()),
             http_timeout_secs: 2,
-            max_retries: 0,
             ..PolymarketDataClientConfig::default()
         };
         let client = PolymarketDataClientFactory::create_client(POLYMARKET, &config).unwrap();
 
+        let mut gamma = Box::pin(client.provider().http_client().request_tags());
+
+        // Advance backoff after completed CONNECT attempts; keep socket I/O on the real clock
+        for completed in 1..=3 {
+            tokio::select! {
+                biased;
+                result = &mut gamma => panic!("Gamma retries ended early: {result:?}"),
+                () = wait_until_async(
+                    || async { requests.lock().await.len() >= completed },
+                    Duration::from_secs(5),
+                ) => {}
+            }
+            assert!(futures_util::poll!(&mut gamma).is_pending());
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(10)).await;
+            tokio::time::resume();
+        }
+
         let errors = [
-            client
-                .provider()
-                .http_client()
-                .request_tags()
+            tokio::time::timeout(Duration::from_secs(5), gamma)
                 .await
+                .unwrap()
                 .unwrap_err()
                 .to_string(),
             client
@@ -562,11 +590,12 @@ mod tests {
 
         assert_eq!(
             request_lines,
-            [
-                "CONNECT gamma.fixture:443 HTTP/1.1",
-                "CONNECT clob-public.fixture:443 HTTP/1.1",
-                "CONNECT data.fixture:443 HTTP/1.1",
-            ]
+            std::iter::repeat_n("CONNECT gamma.fixture:443 HTTP/1.1", 4)
+                .chain([
+                    "CONNECT clob-public.fixture:443 HTTP/1.1",
+                    "CONNECT data.fixture:443 HTTP/1.1",
+                ])
+                .collect::<Vec<_>>()
         );
 
         for request in requests.iter() {

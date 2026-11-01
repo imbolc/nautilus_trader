@@ -228,7 +228,9 @@ fn create_gamma_client(addr: &SocketAddr) -> PolymarketGammaRawHttpClient {
 }
 
 fn create_gamma_domain_client(addr: &SocketAddr) -> PolymarketGammaHttpClient {
-    PolymarketGammaHttpClient::new(Some(format!("http://{addr}")), 5, gamma_retry_config()).unwrap()
+    PolymarketGammaHttpClient::new(Some(format!("http://{addr}")), 5, gamma_retry_config())
+        .unwrap()
+        .with_http_retry_config(gamma_retry_config())
 }
 
 fn gamma_retry_config() -> RetryConfig {
@@ -4043,15 +4045,14 @@ async fn test_gamma_request_retry_budget(
 async fn test_gamma_invalid_retry_config_does_not_send_request() {
     let state = TestServerState::default();
     let addr = start_mock_server(state.clone()).await;
-    let client = PolymarketGammaHttpClient::new(
-        Some(format!("http://{addr}")),
-        5,
-        RetryConfig {
-            backoff_factor: 0.5,
-            ..gamma_retry_config()
-        },
-    )
-    .unwrap();
+    let http_retry_config = RetryConfig {
+        backoff_factor: 0.5,
+        ..gamma_retry_config()
+    };
+    let client =
+        PolymarketGammaHttpClient::new(Some(format!("http://{addr}")), 5, gamma_retry_config())
+            .unwrap()
+            .with_http_retry_config(http_retry_config);
 
     let error = client
         .request_markets_by_params(GetGammaMarketsParams::default())
@@ -4087,17 +4088,16 @@ async fn test_gamma_tags_retry(#[case] timeout: bool, #[case] max_retries: u32) 
         }
     });
     let addr = start_mock_router(router).await;
-    let client = PolymarketGammaHttpClient::new(
-        Some(format!("http://{addr}")),
-        5,
-        RetryConfig {
-            max_retries,
-            operation_timeout_ms: Some(300),
-            max_elapsed_ms: Some(2_000),
-            ..gamma_retry_config()
-        },
-    )
-    .unwrap();
+    let http_retry_config = RetryConfig {
+        max_retries,
+        operation_timeout_ms: Some(300),
+        max_elapsed_ms: Some(2_000),
+        ..gamma_retry_config()
+    };
+    let client =
+        PolymarketGammaHttpClient::new(Some(format!("http://{addr}")), 5, gamma_retry_config())
+            .unwrap()
+            .with_http_retry_config(http_retry_config);
 
     let result = client.request_tags().await;
 
@@ -4127,15 +4127,14 @@ async fn test_gamma_retry_after_exceeding_budget_does_not_retry(#[case] status: 
         async move { (status, [("retry-after", "60")], "temporarily unavailable") }
     });
     let addr = start_mock_router(router).await;
-    let client = PolymarketGammaHttpClient::new(
-        Some(format!("http://{addr}")),
-        5,
-        RetryConfig {
-            max_elapsed_ms: Some(1_000),
-            ..gamma_retry_config()
-        },
-    )
-    .unwrap();
+    let http_retry_config = RetryConfig {
+        max_elapsed_ms: Some(1_000),
+        ..gamma_retry_config()
+    };
+    let client =
+        PolymarketGammaHttpClient::new(Some(format!("http://{addr}")), 5, gamma_retry_config())
+            .unwrap()
+            .with_http_retry_config(http_retry_config);
 
     let error = client.request_tags().await.unwrap_err();
     let error = error.downcast_ref::<Error>().unwrap();
@@ -4154,7 +4153,7 @@ async fn test_gamma_retry_after_exceeding_budget_does_not_retry(#[case] status: 
 #[case::service_unavailable(StatusCode::SERVICE_UNAVAILABLE, None)]
 #[case::timeout(StatusCode::SERVICE_UNAVAILABLE, Some(100))]
 #[tokio::test]
-async fn test_gamma_slug_retry_after_is_honored_across_batch(
+async fn test_gamma_slug_retry_after_is_honored_per_request(
     #[case] status: StatusCode,
     #[case] operation_timeout_ms: Option<u64>,
     #[values(false, true)] hint_first: bool,
@@ -4179,16 +4178,15 @@ async fn test_gamma_slug_retry_after_is_honored_across_batch(
         }
     });
     let addr = start_mock_router(router).await;
-    let client = PolymarketGammaHttpClient::new(
-        Some(format!("http://{addr}")),
-        5,
-        RetryConfig {
-            operation_timeout_ms,
-            max_elapsed_ms: Some(1_000),
-            ..gamma_retry_config()
-        },
-    )
-    .unwrap();
+    let http_retry_config = RetryConfig {
+        operation_timeout_ms,
+        max_elapsed_ms: Some(1_000),
+        ..gamma_retry_config()
+    };
+    let client =
+        PolymarketGammaHttpClient::new(Some(format!("http://{addr}")), 5, gamma_retry_config())
+            .unwrap()
+            .with_http_retry_config(http_retry_config);
     let mut slugs = if hint_first {
         vec!["hinted".to_string(), "unhinted".to_string()]
     } else {
@@ -4204,24 +4202,17 @@ async fn test_gamma_slug_retry_after_is_honored_across_batch(
         .await
         .unwrap_err();
 
-    if operation_timeout_ms.is_some() {
-        assert_eq!(error.to_string(), "timeout");
+    assert!(error.to_string().ends_with(if hint_first {
+        ": hinted failure"
     } else {
-        assert!(error.to_string().ends_with(if hint_first {
-            ": hinted failure"
-        } else {
-            ": unhinted failure"
-        }));
-    }
-    let mut slugs = queries.lock().await;
-    slugs.sort_unstable();
+        ": unhinted failure"
+    }));
+    let slugs = queries.lock().await;
+    assert_eq!(slugs.iter().filter(|slug| *slug == "hinted").count(), 1);
+    assert_eq!(slugs.iter().filter(|slug| *slug == "unhinted").count(), 3);
     assert_eq!(
-        *slugs,
-        if operation_timeout_ms.is_some() {
-            vec!["hinted", "pending", "unhinted"]
-        } else {
-            vec!["hinted", "unhinted"]
-        }
+        slugs.iter().filter(|slug| *slug == "pending").count(),
+        if operation_timeout_ms.is_some() { 3 } else { 0 }
     );
 }
 
@@ -4229,7 +4220,9 @@ async fn test_gamma_slug_retry_after_is_honored_across_batch(
 #[case::rate_limit(StatusCode::TOO_MANY_REQUESTS)]
 #[case::service_unavailable(StatusCode::SERVICE_UNAVAILABLE)]
 #[tokio::test]
-async fn test_gamma_slug_retry_after_recovers_after_batch_timeout(#[case] status: StatusCode) {
+async fn test_gamma_slug_retry_after_recovers_alongside_request_timeout(
+    #[case] status: StatusCode,
+) {
     let requests = Arc::new(tokio::sync::Mutex::new(HashMap::<String, Vec<_>>::new()));
     let received = Arc::clone(&requests);
     let router = Router::new().fallback(move |Query(params): Query<HashMap<String, String>>| {
@@ -4254,16 +4247,15 @@ async fn test_gamma_slug_retry_after_recovers_after_batch_timeout(#[case] status
         }
     });
     let addr = start_mock_router(router).await;
-    let client = PolymarketGammaHttpClient::new(
-        Some(format!("http://{addr}")),
-        5,
-        RetryConfig {
-            operation_timeout_ms: Some(100),
-            max_elapsed_ms: Some(2_000),
-            ..gamma_retry_config()
-        },
-    )
-    .unwrap();
+    let http_retry_config = RetryConfig {
+        operation_timeout_ms: Some(100),
+        max_elapsed_ms: Some(2_000),
+        ..gamma_retry_config()
+    };
+    let client =
+        PolymarketGammaHttpClient::new(Some(format!("http://{addr}")), 5, gamma_retry_config())
+            .unwrap()
+            .with_http_retry_config(http_retry_config);
 
     let instruments = client
         .request_instruments_by_slugs_with_retry(vec!["hinted".to_string(), "pending".to_string()])
@@ -4272,13 +4264,13 @@ async fn test_gamma_slug_retry_after_recovers_after_batch_timeout(#[case] status
 
     assert_eq!(instruments.len(), 4);
     let requests = requests.lock().await;
-    let hinted_at = requests["hinted"][0];
     assert_eq!(requests.len(), 2);
-
-    for times in requests.values() {
-        assert_eq!(times.len(), 2);
-        assert!(times[1].duration_since(hinted_at) >= Duration::from_secs(1));
-    }
+    assert_eq!(requests["hinted"].len(), 2);
+    assert_eq!(requests["pending"].len(), 2);
+    assert!(requests["hinted"][1].duration_since(requests["hinted"][0]) >= Duration::from_secs(1));
+    assert!(
+        requests["pending"][1].duration_since(requests["pending"][0]) >= Duration::from_millis(100)
+    );
 }
 
 #[rstest]
