@@ -15,6 +15,7 @@ Released on TBD (UTC).
 - Added `HttpClient` certificate support through `certs_dir`
 - Added Postgres cache support for actor and strategy state, synthetics, heartbeat writes, and entity deletion
 - Added `OrderModifyDenied` and `OrderCancelDenied` events and strategy and execution algorithm callbacks
+- Added `OrderPriorityResetPolicy` for sandbox and backtests (#5503), thanks for reporting @todorkolev
 - Added Python `ParquetDataCatalog.query_instrument_statuses` and `query_instrument_closes`
 - Added sandbox execution matching against `OrderBookDepth` snapshots (#5436), thanks @graceyangfan
 - Added Betfair certificate login through `certs_dir`
@@ -29,6 +30,10 @@ Released on TBD (UTC).
 
 - Removed Python `RedisCacheDatabase` and `PostgresCacheDatabase`; configure cache persistence through node factories
 - Removed Python `RedisMessageBusBacking`; configure external message bus backing through node factories
+- Removed `BookImbalanceActor` and its config; use `OrderBookImbalance` and `OrderBookImbalanceConfig`
+- Changed `OrderMatchingEngineConfig` literals; add `order_priority_reset_policy: Default::default()`
+- Changed `SimulatedVenueConfig` literals; add `order_priority_reset_policy: Default::default()`
+- Changed `SandboxExecutionClientConfig` literals; add `order_priority_reset_policy: Default::default()`
 - Changed `BacktestEngine::reset` to return trader reset errors; run the engine before resetting
 - Changed local modify/cancel refusals to denied events; handle `on_order_modify_denied` and `on_order_cancel_denied`
 - Changed modify/cancel rejection emitters and factories to take `causation_id`; pass the command ID or `None`
@@ -102,6 +107,8 @@ Released on TBD (UTC).
 
 ### Fixes
 
+- Fixed emulated orders sharing a trigger instrument triggering from the wrong quote or trade source
+- Fixed resting GTD orders filling after expiry in backtests and sandbox execution
 - Fixed `Strategy::market_exit` skipping emulated and active-local orders during cancellation and completion
 - Fixed bounded reconciliation leaving retained positions open after explicit closing fills
 - Fixed Arrow trade tick decoding panicking on malformed trade IDs
@@ -120,16 +127,21 @@ Released on TBD (UTC).
 - Fixed managed order book subscriptions reusing a cached book of a different type
 - Fixed managed order book quotes using event time for `ts_init`
 - Fixed command refusals clearing unrelated pending operations or rolling back later order state
+- Fixed execution algorithms skipping spawn accounting for order events while stopped
 - Fixed mixed-key market data batches being cached under the first row's instrument or bar type
 - Fixed historical time bar boundary assignment for ticks sharing a timestamp
 - Fixed composite time bars closing before their final source bar at a shared deadline
 - Fixed queued timer callbacks logging missing-actor errors or targeting reused actor IDs after retirement
 - Fixed backtest timer cancellation across data gaps and tail flushes
 - Fixed `BacktestEngine` reset hiding component reset failures
-- Fixed `EmaCross`, `BookImbalanceActor`, and `DeltaNeutralVol` retaining runtime state on engine reset
+- Fixed `EmaCross` and `DeltaNeutralVol` retaining runtime state on engine reset
 - Fixed streaming backtests failing to resume when the first batch has only data before the start time
 - Fixed Python `ForexSession.__repr__` identifying sessions as `PositionSide`
 - Fixed `ExecTester` panicking on unsupported `GTD` brackets
+- Fixed `ExecTester` stop replacements exceeding remaining quantity after partial fills
+- Fixed `ExecTester` losing order quantity precision and dropping batch order parameters
+- Fixed `ExecTester` retaining data subscriptions on stop in dry-run mode or after cache-miss startup
+- Fixed test data downloads ignoring configured retry deadlines and skipping later retry delays with `immediate_first`
 - Fixed Postgres cache not persisting or restoring Greeks and yield curves with `save_market_data`
 - Fixed exchange-rate conversions failing on overflow despite a representable route or returning zero on underflow
 - Fixed Sockudo WebSocket timeouts overriding the client heartbeat and idle policy
@@ -212,9 +224,10 @@ Released on TBD (UTC).
 - Improved Docker publishing with temporary digest directories isolated per job
 - Standardized module ordering checks to place unconditional modules before cfg-gated modules
 - Optimized Architect AX market data trade parsing and reduced allocations
-- Refined Derive report generation with HTTP collection on runtime workers (#5216)
+- Standardize Deribit report generation with HTTP collection on runtime workers (#5216)
+- Standardize Derive report generation with HTTP collection on runtime workers (#5216)
+- Standardize Polymarket report generation with HTTP collection on runtime workers (#5216)
 - Refined Polymarket limit submit responses and venue order ID lookup
-- Refined Polymarket report generation with HTTP collection on runtime workers (#5216)
 - Optimized `deserialize_decimal_from_str` and `deserialize_decimal_or_zero` to avoid intermediate string copies
 - Optimized empty command-queue drains and L1 order-book quote replacement
 - Upgraded `cargo-binstall` tool to v1.26.2
@@ -786,8 +799,8 @@ Released on 15th October 2026 (UTC).
 - Migrated OKX built-in WebSocket URLs to port 443 for live and demo environments
 - Ported the Interactive Brokers adapter to the `ibapi` v5.0.0 API (#5041), thanks @faysou
 - Improved Kraken margin entry average and net-short test coverage (#5214), thanks @zhaow-de
-- Improved Lighter report generation with HTTP collection on runtime workers (#5216)
 - Improved Lighter execution race coverage and grouped-order signer validation
+- Standardize Lighter report generation with HTTP collection on runtime workers (#5216)
 - Refined backtest replay with shared ordered batch consumption, thanks @faysou
 - Refined shared pointer cloning in data, infrastructure, CLI, and event store code (#5236, #5289), thanks @mirooon
 - Refined shared pointer cloning in network clients and transports (#5294), thanks @mirooon

@@ -598,10 +598,7 @@ impl LiveNode {
         }
 
         let stop_result = self.finalize_stop().await;
-        let drained_events = self.drain_runner_pending();
-        if drained_events > 0 {
-            log::info!("Drained {drained_events} remaining events during shutdown");
-        }
+        self.drain_runner_pending();
 
         match (controller_stop_result, stop_result) {
             (Ok(()), Ok(())) => Ok(()),
@@ -1669,6 +1666,7 @@ impl LiveNode {
                     match result {
                         ReportTaskOutcome::Completed(result) => {
                             let result = result.finish();
+                            self.drain_exec_events_before_reconciliation(&mut exec_evt_rx);
                             let client_refs = self
                                 .exec_clients
                                 .iter()
@@ -1720,6 +1718,7 @@ impl LiveNode {
                     let maintenance_start = dst::time::Instant::now();
 
                     if let Some(task) = targeted_order_report_task.take() {
+                        self.drain_exec_events_before_reconciliation(&mut exec_evt_rx);
                         self.complete_targeted_order_report_check(task, &result);
                     }
                     record_runner_maintenance(&metrics, maintenance_start, metrics_start);
@@ -2171,6 +2170,15 @@ impl LiveNode {
         }
     }
 
+    fn drain_exec_events_before_reconciliation(
+        &mut self,
+        exec_evt_rx: &mut tokio::sync::mpsc::UnboundedReceiver<DispatchMessage<ExecutionEvent>>,
+    ) {
+        while let Ok(event) = exec_evt_rx.try_recv() {
+            event.dispatch(|event| self.process_exec_event(event));
+        }
+    }
+
     fn process_reconciliation_events(&mut self, events: &[OrderEventAny]) {
         if events.is_empty() {
             self.publish_submission_recovery_exhaustions();
@@ -2431,10 +2439,7 @@ impl LiveNode {
                 receivers.data_cmd,
             );
         } else {
-            let drained_events = self.drain_runner_pending();
-            if drained_events > 0 {
-                log::info!("Drained {drained_events} remaining events during shutdown");
-            }
+            self.drain_runner_pending();
         }
 
         let mut errors = Vec::new();
@@ -2619,44 +2624,63 @@ impl LiveNode {
         data_evt_rx: &mut tokio::sync::mpsc::UnboundedReceiver<DispatchMessage<DataEvent>>,
         data_cmd_rx: &mut tokio::sync::mpsc::UnboundedReceiver<DispatchMessage<DataCommand>>,
     ) {
+        let pending = time_evt_rx.len()
+            + system_evt_rx.len()
+            + system_cmd_rx.len()
+            + exec_evt_rx.len()
+            + exec_cmd_rx.len()
+            + data_evt_rx.len()
+            + data_cmd_rx.len();
+        log::info!("Draining shutdown queues ({pending} events initially pending)");
+
         let mut drained = 0;
+        let log_progress = |processed: usize| {
+            if processed.is_multiple_of(10_000) {
+                log::info!("Processed {processed} events during shutdown drain");
+            }
+        };
 
         while let Ok(handler) = time_evt_rx.try_recv() {
             let _ = AsyncRunner::handle_time_event(handler);
             drained += 1;
+            log_progress(drained);
         }
 
         while system_evt_rx.try_recv().is_ok() {
             drained += 1;
+            log_progress(drained);
         }
 
         while system_cmd_rx.try_recv().is_ok() {
             drained += 1;
+            log_progress(drained);
         }
 
         while let Ok(evt) = data_evt_rx.try_recv() {
             AsyncRunner::dispatch_data_event(evt);
             drained += 1;
+            log_progress(drained);
         }
 
         while let Ok(cmd) = data_cmd_rx.try_recv() {
             AsyncRunner::handle_data_command(cmd);
             drained += 1;
+            log_progress(drained);
         }
 
         while let Ok(evt) = exec_evt_rx.try_recv() {
             AsyncRunner::dispatch_exec_event(evt);
             drained += 1;
+            log_progress(drained);
         }
 
         while let Ok(cmd) = exec_cmd_rx.try_recv() {
             AsyncRunner::handle_trading_command(cmd);
             drained += 1;
+            log_progress(drained);
         }
 
-        if drained > 0 {
-            log::info!("Drained {drained} remaining events during shutdown");
-        }
+        log::info!("Drained {drained} remaining events during shutdown");
     }
 
     fn observe_exec_event_before_dispatch(
@@ -3644,7 +3668,7 @@ mod tests {
     use crate::{
         execution::{
             client::LiveExecutionClient,
-            manager::{PositionFillReportQuery, ReportClientCoverage},
+            manager::{PositionFillReportQuery, ReportClientCoverage, SourcedOrderStatusReport},
             submission::{
                 SubmissionRecoveryExhausted, SubmissionRecoveryPolicy, SubmissionRecoverySource,
             },
@@ -5126,6 +5150,105 @@ mod tests {
 
         assert!(fill.reconciliation);
         assert!(is_recent_fill(&node, &fill));
+    }
+
+    #[rstest]
+    fn test_drain_exec_events_before_reconciliation_applies_real_fill_first() {
+        let (mut node, fill_event, instrument) = recent_fill_test_fixture("DeferredFillNode");
+
+        let OrderEventAny::Filled(fill) = fill_event else {
+            unreachable!();
+        };
+
+        let account_id = fill.account_id;
+        let venue_order_id = fill.venue_order_id;
+        let client_id = ClientId::from("TEST-EVIDENCE");
+        node.kernel
+            .exec_engine
+            .borrow_mut()
+            .register_client(Box::new(StubExecutionClient::new(
+                client_id,
+                account_id,
+                instrument.id().venue,
+                OmsType::Netting,
+                None,
+            )))
+            .unwrap();
+
+        let report = FillReport::new(
+            account_id,
+            instrument.id(),
+            venue_order_id,
+            fill.trade_id,
+            fill.order_side,
+            fill.last_qty,
+            fill.last_px,
+            fill.commission.unwrap(),
+            fill.liquidity_side,
+            Some(fill.client_order_id),
+            None,
+            fill.ts_event,
+            fill.ts_init,
+            None,
+        );
+        let (exec_evt_tx, mut exec_evt_rx) =
+            tokio::sync::mpsc::unbounded_channel::<DispatchMessage<ExecutionEvent>>();
+        exec_evt_tx
+            .send(ExecutionEvent::Report(ExecutionReport::Fill(Box::new(report))).into())
+            .unwrap();
+
+        node.drain_exec_events_before_reconciliation(&mut exec_evt_rx);
+
+        assert!(exec_evt_rx.try_recv().is_err());
+        let order = node
+            .kernel
+            .cache
+            .borrow()
+            .order_owned(&fill.client_order_id)
+            .unwrap();
+        assert_eq!(order.filled_qty(), fill.last_qty);
+        assert_eq!(order.trade_ids(), &[&fill.trade_id]);
+
+        let report = OrderStatusReport::new(
+            account_id,
+            instrument.id(),
+            Some(fill.client_order_id),
+            venue_order_id,
+            OrderSide::Buy.into(),
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            OrderStatus::PartiallyFilled,
+            Quantity::from("10.0"),
+            fill.last_qty,
+            UnixNanos::from(1_000),
+            UnixNanos::from(1_000),
+            UnixNanos::from(1_000),
+            None,
+        )
+        .with_avg_px(dec!(100.0));
+        let engine = node.kernel.exec_engine.borrow();
+        let clients = engine.get_all_clients();
+        let check = node
+            .exec_manager
+            .prepare_open_order_report_check(UUID4::new(), &clients);
+        let reconciliation = node.exec_manager.reconcile_open_order_reports(
+            &check,
+            vec![SourcedOrderStatusReport { client_id, report }],
+            &IndexSet::new(),
+            &IndexSet::new(),
+            &clients,
+        );
+        drop(engine);
+        node.process_reconciliation_events(&reconciliation.events);
+
+        let order = node
+            .kernel
+            .cache
+            .borrow()
+            .order_owned(&fill.client_order_id)
+            .unwrap();
+        assert_eq!(order.filled_qty(), fill.last_qty);
+        assert_eq!(order.trade_ids(), &[&fill.trade_id]);
     }
 
     #[rstest]
@@ -9453,6 +9576,72 @@ mod tests {
         engine.reset();
         engine.execute(stub_data_command());
         assert_eq!(engine.command_count(), 1);
+    }
+
+    #[rstest]
+    #[case::manual(false)]
+    #[case::integrated(true)]
+    fn test_shutdown_drain_logs_progress(
+        #[case] integrated: bool,
+        #[values(0, 9_999, 10_000, 20_001)] pending: usize,
+    ) {
+        struct DrainLogCapture(Mutex<Vec<String>>);
+
+        impl Log for DrainLogCapture {
+            fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+                metadata.level() == Level::Info
+            }
+
+            fn log(&self, record: &Record<'_>) {
+                assert_eq!(record.level(), Level::Info);
+                self.0.lock().push(record.args().to_string());
+            }
+
+            fn flush(&self) {}
+        }
+
+        static LOGS: DrainLogCapture = DrainLogCapture(Mutex::new(Vec::new()));
+        log::set_logger(&LOGS).unwrap();
+        log::set_max_level(LevelFilter::Info);
+
+        let mut runner = AsyncRunner::new();
+        runner.bind_senders();
+        let event = TimeEvent::new("drain".into(), UUID4::new(), 0.into(), 0.into());
+
+        for _ in 0..pending {
+            nautilus_common::runner::get_time_event_sender().send(TimeEventMessage::new(
+                event.clone(),
+                TimeEventCallback::from(|_: TimeEvent| {}),
+            ));
+        }
+
+        if integrated {
+            let mut channels = runner.take_channels();
+            LiveNode::drain_channels(
+                &mut channels.time_evt_rx,
+                &mut channels.system_evt_rx,
+                &mut channels.system_cmd_rx,
+                &mut channels.exec_evt_rx,
+                &mut channels.exec_cmd_rx,
+                &mut channels.data_evt_rx,
+                &mut channels.data_cmd_rx,
+            );
+        } else {
+            assert_eq!(runner.poll_pending(|_| {}), pending);
+        }
+
+        let mut expected = vec![format!(
+            "Draining shutdown queues ({pending} events initially pending)"
+        )];
+        expected.extend(
+            (10_000..=pending)
+                .step_by(10_000)
+                .map(|processed| format!("Processed {processed} events during shutdown drain")),
+        );
+        expected.push(format!(
+            "Drained {pending} remaining events during shutdown"
+        ));
+        assert_eq!(*LOGS.0.lock(), expected);
     }
 
     #[rstest]
