@@ -74,9 +74,9 @@ use nautilus_model::{
         AccountType, ContingencyType, OmsType, OrderStatus, OrderType, PositionSide, TimeInForce,
     },
     events::{
-        OrderAccepted, OrderDenied, OrderDeniedReason, OrderEvent, OrderEventAny, OrderFillVoided,
-        OrderFilled, OrderInitialized, OrderUpdated, PositionChanged, PositionClosed,
-        PositionEvent, PositionOpened,
+        OrderAccepted, OrderCancelDenied, OrderDenied, OrderDeniedReason, OrderEvent,
+        OrderEventAny, OrderFillVoided, OrderFilled, OrderInitialized, OrderModifyDenied,
+        OrderUpdated, PositionChanged, PositionClosed, PositionEvent, PositionOpened,
     },
     identifiers::{
         AccountId, ClientId, ClientOrderId, ExecAlgorithmId, InstrumentId, PositionId, StrategyId,
@@ -1265,11 +1265,7 @@ impl ExecutionEngine {
 
         self.materialize_external_order(
             initialized,
-            client_order_id,
             report.venue_order_id,
-            report.instrument_id,
-            strategy_id,
-            ts_now,
             Some(report.order_status),
             self.source_client_id_for_account(report.account_id, &report.instrument_id),
         )
@@ -1356,11 +1352,7 @@ impl ExecutionEngine {
 
         self.materialize_external_order(
             initialized,
-            client_order_id,
             report.venue_order_id,
-            report.instrument_id,
-            strategy_id,
-            ts_now,
             None,
             self.source_client_id_for_account(report.account_id, &report.instrument_id),
         )
@@ -1379,22 +1371,19 @@ impl ExecutionEngine {
 
     /// Adds an external order to the cache and registers it for adapter routing.
     /// Returns the registered order on success.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "external order materialization threads several ids and a timestamp"
-    )]
     fn materialize_external_order(
         &self,
         initialized: OrderInitialized,
-        client_order_id: ClientOrderId,
         venue_order_id: VenueOrderId,
-        instrument_id: InstrumentId,
-        strategy_id: StrategyId,
-        ts_now: UnixNanos,
         order_status: Option<OrderStatus>,
         source_client_id: Option<ClientId>,
     ) -> Option<OrderAny> {
+        let client_order_id = initialized.client_order_id;
+        let instrument_id = initialized.instrument_id;
+        let strategy_id = initialized.strategy_id;
+        let ts_init = initialized.ts_init;
         let initialized = OrderEventAny::Initialized(initialized);
+
         let order = match OrderAny::from_events(vec![initialized.clone()]) {
             Ok(order) => order,
             Err(e) => {
@@ -1432,7 +1421,7 @@ impl ExecutionEngine {
             venue_order_id,
             instrument_id,
             strategy_id,
-            ts_now,
+            ts_init,
         );
 
         Some(order)
@@ -1792,11 +1781,7 @@ impl ExecutionEngine {
             return;
         };
 
-        let cached_signed_qty = match position.side {
-            PositionSide::Long => position.quantity.as_decimal(),
-            PositionSide::Short => -position.quantity.as_decimal(),
-            _ => Decimal::ZERO,
-        };
+        let cached_signed_qty = Self::position_signed_decimal_qty(&position);
         let venue_signed_qty = report.signed_decimal_qty;
 
         if cached_signed_qty != venue_signed_qty {
@@ -2000,6 +1985,28 @@ impl ExecutionEngine {
         self.handle_event_with_position_application(&OrderEventAny::Filled(fill.clone()), false);
     }
 
+    /// Returns a cached position ID for a reconciliation fill without changing routing state.
+    ///
+    /// Requires a cached order and resolves indexed orders, explicit HEDGING IDs, and NETTING
+    /// routing. Returns `None` for HEDGING routing conflicts, missing positions, or unindexed
+    /// HEDGING orders whose fill has no `position_id`.
+    /// The destination can change before application.
+    #[must_use]
+    pub fn reconciliation_position_id(&self, fill: &OrderFilled) -> Option<PositionId> {
+        let oms_type = self.determine_oms_type(fill);
+        let indexed = self.cached_fill_position_id(fill, oms_type).ok()?;
+        let cache = self.cache.borrow();
+        let order = cache.order(&fill.client_order_id)?;
+
+        let position_id = match (indexed, oms_type) {
+            (Some(id), _) => id,
+            (None, OmsType::Hedging) => fill.position_id?,
+            (None, _) => self.determine_netting_position_id(fill, Some(&order)),
+        };
+
+        cache.position_ref(&position_id).map(|position| position.id)
+    }
+
     /// Starts the execution engine and all registered execution clients.
     pub fn start(&mut self) {
         for client in self.get_clients_mut() {
@@ -2020,11 +2027,7 @@ impl ExecutionEngine {
     /// (e.g. via an internal `is_stopped` guard); the backtest teardown
     /// sequence calls `stop()` more than once per run.
     pub fn stop(&mut self) {
-        for client in self.get_clients_mut() {
-            if client.stop().is_err() {
-                log::error!("Failed to stop execution client {}", client.client_id());
-            }
-        }
+        self.stop_clients();
 
         self.stop_snapshot_timer();
         self.stop_purge_timers();
@@ -2142,43 +2145,7 @@ impl ExecutionEngine {
         let client = if let Some(adapter) = self.find_client_for_command(&command) {
             adapter.client.as_ref()
         } else {
-            let routing_context = Self::routing_context_for_command(&command);
-
-            log::error!(
-                "No execution client found for command: client_id={:?}, {routing_context}, command={command}",
-                command.client_id(),
-            );
-
-            let reason = OrderDeniedReason::NoExecutionClient {
-                client_id: command.client_id(),
-                routing_context,
-            }
-            .to_string();
-
-            match command {
-                TradingCommand::SubmitOrder(cmd) => {
-                    let order = self
-                        .cache
-                        .borrow()
-                        .order(&cmd.client_order_id)
-                        .map(|o| o.clone());
-
-                    if let Some(order) = order {
-                        self.deny_order(&order, &reason);
-                    }
-                }
-                TradingCommand::SubmitOrderList(cmd) => {
-                    let orders: Vec<OrderAny> = self
-                        .cache
-                        .borrow()
-                        .orders_for_ids(&cmd.order_list.client_order_ids, &cmd);
-
-                    for order in &orders {
-                        self.deny_order(order, &reason);
-                    }
-                }
-                _ => {}
-            }
+            self.deny_unroutable_command(command);
 
             return;
         };
@@ -2193,6 +2160,58 @@ impl ExecutionEngine {
             TradingCommand::CancelAllOrders(cmd) => self.handle_cancel_all_orders(client, &cmd),
             TradingCommand::QueryOrder(cmd) => self.handle_query_order(client, cmd),
             TradingCommand::QueryAccount(cmd) => self.handle_query_account(client, cmd),
+        }
+    }
+
+    fn deny_unroutable_command(&self, command: TradingCommand) {
+        let routing_context = Self::routing_context_for_command(&command);
+
+        log::error!(
+            "No execution client found for command: client_id={:?}, {routing_context}, command={command}",
+            command.client_id(),
+        );
+
+        let reason = OrderDeniedReason::NoExecutionClient {
+            client_id: command.client_id(),
+            routing_context,
+        }
+        .to_string();
+
+        match command {
+            TradingCommand::SubmitOrder(cmd) => {
+                let order = self
+                    .cache
+                    .borrow()
+                    .order(&cmd.client_order_id)
+                    .map(|o| o.clone());
+
+                if let Some(order) = order {
+                    self.deny_order(&order, &reason);
+                }
+            }
+            TradingCommand::SubmitOrderList(cmd) => {
+                let orders: Vec<OrderAny> = self
+                    .cache
+                    .borrow()
+                    .orders_for_ids(&cmd.order_list.client_order_ids, &cmd);
+
+                for order in &orders {
+                    self.deny_order(order, &reason);
+                }
+            }
+            TradingCommand::ModifyOrder(cmd) => self.deny_modify_command(&cmd, &reason),
+            TradingCommand::ModifyOrders(cmd) => {
+                for modify in &cmd.modifies {
+                    self.deny_modify_command(modify, &reason);
+                }
+            }
+            TradingCommand::CancelOrder(cmd) => self.deny_cancel_command(&cmd, &reason),
+            TradingCommand::CancelOrders(cmd) => {
+                for cancel in &cmd.cancels {
+                    self.deny_cancel_command(cancel, &reason);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -2322,18 +2341,11 @@ impl ExecutionEngine {
 
     fn routing_context_for_command(command: &TradingCommand) -> String {
         match command {
-            TradingCommand::SubmitOrder(cmd) => format!("venue={}", cmd.instrument_id.venue),
-            TradingCommand::SubmitOrderList(cmd) => format!("venue={}", cmd.instrument_id.venue),
-            TradingCommand::ModifyOrder(cmd) => format!("venue={}", cmd.instrument_id.venue),
-            TradingCommand::ModifyOrders(cmd) => format!("venue={}", cmd.instrument_id.venue),
-            TradingCommand::CancelOrder(cmd) => format!("venue={}", cmd.instrument_id.venue),
-            TradingCommand::CancelOrders(cmd) => format!("venue={}", cmd.instrument_id.venue),
-            TradingCommand::CancelAllOrders(cmd) => format!("venue={}", cmd.instrument_id.venue),
-            TradingCommand::QueryOrder(cmd) => format!("venue={}", cmd.instrument_id.venue),
             TradingCommand::QueryAccount(cmd) => {
                 let issuer = cmd.account_id.get_issuer();
                 format!("account_id={}, issuer={issuer}", cmd.account_id)
             }
+            _ => format!("venue={}", command.instrument_id().venue),
         }
     }
 
@@ -3067,6 +3079,10 @@ impl ExecutionEngine {
             log::debug!("{RECV}{EVT} {event}");
         }
 
+        if self.publish_absent_order_denial(event) {
+            return true;
+        }
+
         let event_client_order_id = event.client_order_id();
         let mut cache = self.cache.borrow();
 
@@ -3280,42 +3296,11 @@ impl ExecutionEngine {
                     Vec::new()
                 };
 
-                let mut position_events = Vec::new();
-
-                for CorrectedPosition {
-                    position,
-                    corrected_qty,
-                    absorbed_prior_cycles,
-                    closed_cycles_pnl,
-                } in corrected_positions
-                {
-                    if let Err(e) = self.cache.borrow_mut().update_position(&position) {
-                        log::error!("Cannot apply fill void to position {}: {e}", position.id);
-                        return false;
-                    }
-
-                    if absorbed_prior_cycles {
-                        log::info!(
-                            "Settling archived NETTING cycles rebuilt by fill void {} for position {}: realized={closed_cycles_pnl:?}",
-                            voided.trade_id,
-                            position.id,
-                        );
-
-                        self.cache
-                            .borrow_mut()
-                            .settle_position_snapshots(&position, closed_cycles_pnl);
-                    }
-
-                    if self.config.snapshot_positions {
-                        self.create_position_state_snapshot(&position, false);
-                    }
-
-                    position_events.push(Self::create_fill_void_position_event(
-                        &position,
-                        &voided,
-                        corrected_qty,
-                    ));
-                }
+                let Some(position_events) =
+                    self.apply_order_fill_void_positions(corrected_positions, &voided)
+                else {
+                    return false;
+                };
 
                 if self
                     .update_cached_order(client_order_id, &event, true)
@@ -3342,6 +3327,51 @@ impl ExecutionEngine {
         }
 
         true
+    }
+
+    fn apply_order_fill_void_positions(
+        &self,
+        corrected_positions: Vec<CorrectedPosition>,
+        voided: &OrderFillVoided,
+    ) -> Option<Vec<PositionEvent>> {
+        let mut position_events = Vec::new();
+
+        for CorrectedPosition {
+            position,
+            corrected_qty,
+            absorbed_prior_cycles,
+            closed_cycles_pnl,
+        } in corrected_positions
+        {
+            if let Err(e) = self.cache.borrow_mut().update_position(&position) {
+                log::error!("Cannot apply fill void to position {}: {e}", position.id);
+                return None;
+            }
+
+            if absorbed_prior_cycles {
+                log::info!(
+                    "Settling archived NETTING cycles rebuilt by fill void {} for position {}: realized={closed_cycles_pnl:?}",
+                    voided.trade_id,
+                    position.id,
+                );
+
+                self.cache
+                    .borrow_mut()
+                    .settle_position_snapshots(&position, closed_cycles_pnl);
+            }
+
+            if self.config.snapshot_positions {
+                self.create_position_state_snapshot(&position, false);
+            }
+
+            position_events.push(Self::create_fill_void_position_event(
+                &position,
+                voided,
+                corrected_qty,
+            ));
+        }
+
+        Some(position_events)
     }
 
     fn handle_leg_fill_without_order(&mut self, mut fill: OrderFilled) -> bool {
@@ -3530,6 +3560,41 @@ impl ExecutionEngine {
         oms_type: OmsType,
         order: Option<&OrderAny>,
     ) -> Option<PositionId> {
+        let cached_position_id = self.cached_fill_position_id(fill, oms_type).ok()?;
+
+        if let Some(position_id) = cached_position_id {
+            if self.config.debug {
+                log::debug!("Assigned {position_id} to {}", fill.client_order_id());
+            }
+
+            if !self.validate_fill_for_position(position_id, fill) {
+                return None;
+            }
+
+            return Some(position_id);
+        }
+
+        let position_id = match (oms_type, fill.position_id) {
+            (OmsType::Hedging, Some(position_id)) => position_id,
+            (OmsType::Hedging, None) => self.determine_hedging_position_id(fill, order),
+            (OmsType::Netting, _) => self.determine_netting_position_id(fill, order),
+            _ => self.determine_netting_position_id(fill, order),
+        };
+
+        if !self.validate_fill_for_position(position_id, fill) {
+            return None;
+        }
+
+        self.index_exec_spawn_position(fill.client_order_id, order, position_id);
+
+        Some(position_id)
+    }
+
+    fn cached_fill_position_id(
+        &self,
+        fill: &OrderFilled,
+        oms_type: OmsType,
+    ) -> Result<Option<PositionId>, ()> {
         let cache = self.cache.borrow();
 
         let flip = match (oms_type == OmsType::Hedging)
@@ -3539,7 +3604,7 @@ impl ExecutionEngine {
             Ok(flip) => flip.flatten(),
             Err(e) => {
                 log::error!("Cannot route hedging fill {}: {e}", fill.trade_id);
-                return None;
+                return Err(());
             }
         };
 
@@ -3569,7 +3634,7 @@ impl ExecutionEngine {
                     fill.client_order_id(),
                 );
 
-                return None;
+                return Err(());
             }
 
             if oms_type != OmsType::Hedging {
@@ -3581,32 +3646,7 @@ impl ExecutionEngine {
             }
         }
 
-        if let Some(position_id) = cached_position_id {
-            if self.config.debug {
-                log::debug!("Assigned {position_id} to {}", fill.client_order_id());
-            }
-
-            if !self.validate_fill_for_position(position_id, fill) {
-                return None;
-            }
-
-            return Some(position_id);
-        }
-
-        let position_id = match (oms_type, fill.position_id) {
-            (OmsType::Hedging, Some(position_id)) => position_id,
-            (OmsType::Hedging, None) => self.determine_hedging_position_id(fill, order),
-            (OmsType::Netting, _) => self.determine_netting_position_id(fill, order),
-            _ => self.determine_netting_position_id(fill, order),
-        };
-
-        if !self.validate_fill_for_position(position_id, fill) {
-            return None;
-        }
-
-        self.index_exec_spawn_position(fill.client_order_id, order, position_id);
-
-        Some(position_id)
+        Ok(cached_position_id)
     }
 
     fn index_exec_spawn_position(
@@ -4016,7 +4056,9 @@ impl ExecutionEngine {
             | OrderEventAny::Triggered(_)
             | OrderEventAny::PendingUpdate(_)
             | OrderEventAny::PendingCancel(_)
+            | OrderEventAny::ModifyDenied(_)
             | OrderEventAny::ModifyRejected(_)
+            | OrderEventAny::CancelDenied(_)
             | OrderEventAny::CancelRejected(_)
             | OrderEventAny::FillVoided(_) => is_wallet,
             _ => false,
@@ -4038,7 +4080,9 @@ impl ExecutionEngine {
             OrderEventAny::Rejected(_) => switchboard::get_order_rejected_topic(event.instrument_id()),
             OrderEventAny::PendingUpdate(_) => switchboard::get_order_pending_update_topic(event.instrument_id()),
             OrderEventAny::PendingCancel(_) => switchboard::get_order_pending_cancel_topic(event.instrument_id()),
+            OrderEventAny::ModifyDenied(_) => switchboard::get_order_modify_denied_topic(event.instrument_id()),
             OrderEventAny::ModifyRejected(_) => switchboard::get_order_modify_rejected_topic(event.instrument_id()),
+            OrderEventAny::CancelDenied(_) => switchboard::get_order_cancel_denied_topic(event.instrument_id()),
             OrderEventAny::CancelRejected(_) => switchboard::get_order_cancel_rejected_topic(event.instrument_id()),
             OrderEventAny::Canceled(_) => switchboard::get_order_canceled_topic(event.instrument_id()),
             OrderEventAny::FillVoided(_) => switchboard::get_order_fill_voided_topic(event.instrument_id()),
@@ -4410,11 +4454,13 @@ impl ExecutionEngine {
                     event.trade_id
                 );
             }
-            let mut position = self
-                .cache
-                .borrow()
-                .position_owned(&position_id)
+
+            let prior = positions
+                .iter()
+                .find(|position| position.id == position_id)
                 .ok_or_else(|| anyhow::anyhow!("position {position_id} is not cached"))?;
+            let mut position = prior.clone();
+
             let previous = position
                 .fill_voids
                 .iter()
@@ -4455,9 +4501,15 @@ impl ExecutionEngine {
                         .ok_or_else(|| anyhow::anyhow!("position current cycle quantity overflow"))
                 })?;
 
-            let absorbed_prior_cycles = voided_qty > current_cycle_qty;
             let closed_cycles_pnl =
                 position.apply_fill_void(event.clone(), voided_qty, commission_voided)?;
+            let absorbed_prior_cycles = position::requires_snapshot_settlement(
+                prior,
+                &position,
+                voided_qty,
+                current_cycle_qty,
+                self.config.carry_replay_events_on_reopen,
+            );
             corrected_positions.push(CorrectedPosition {
                 position,
                 corrected_qty,
@@ -4810,11 +4862,6 @@ impl ExecutionEngine {
             return None;
         }
 
-        // Verify cache state after update
-        let cache = self.cache.borrow();
-
-        drop(cache);
-
         // Create position state snapshot if enabled
         if self.config.snapshot_positions {
             self.create_position_state_snapshot(position, false);
@@ -5123,6 +5170,104 @@ impl ExecutionEngine {
         }
     }
 
+    fn publish_absent_order_denial(&self, event: &OrderEventAny) -> bool {
+        if matches!(
+            event,
+            OrderEventAny::ModifyDenied(_) | OrderEventAny::CancelDenied(_)
+        ) && !self.cache.borrow().order_exists(&event.client_order_id())
+        {
+            self.publish_order_event(event);
+            return true;
+        }
+
+        false
+    }
+
+    fn deny_modify_command(&self, command: &ModifyOrder, reason: &str) {
+        let order = self
+            .cache
+            .borrow()
+            .order(&command.client_order_id)
+            .map(|order| order.clone());
+        let ts_now = self.clock.borrow().timestamp_ns();
+
+        let mut event = OrderModifyDenied::new(
+            order.as_ref().map_or(command.trader_id, Order::trader_id),
+            order
+                .as_ref()
+                .map_or(command.strategy_id, Order::strategy_id),
+            order
+                .as_ref()
+                .map_or(command.instrument_id, Order::instrument_id),
+            command.client_order_id,
+            reason.into(),
+            UUID4::new(),
+            ts_now,
+            ts_now,
+            order
+                .as_ref()
+                .and_then(Order::venue_order_id)
+                .or(command.venue_order_id),
+            order.as_ref().and_then(Order::account_id),
+        );
+        event.causation_id = Some(command.command_id);
+        self.publish_command_denied(&OrderEventAny::ModifyDenied(event));
+    }
+
+    fn deny_cancel_command(&self, command: &CancelOrder, reason: &str) {
+        let order = self
+            .cache
+            .borrow()
+            .order(&command.client_order_id)
+            .map(|order| order.clone());
+        let ts_now = self.clock.borrow().timestamp_ns();
+
+        let mut event = OrderCancelDenied::new(
+            order.as_ref().map_or(command.trader_id, Order::trader_id),
+            order
+                .as_ref()
+                .map_or(command.strategy_id, Order::strategy_id),
+            order
+                .as_ref()
+                .map_or(command.instrument_id, Order::instrument_id),
+            command.client_order_id,
+            reason.into(),
+            UUID4::new(),
+            ts_now,
+            ts_now,
+            order
+                .as_ref()
+                .and_then(Order::venue_order_id)
+                .or(command.venue_order_id),
+            order.as_ref().and_then(Order::account_id),
+        );
+        event.causation_id = Some(command.command_id);
+        self.publish_command_denied(&OrderEventAny::CancelDenied(event));
+    }
+
+    fn publish_command_denied(&self, event: &OrderEventAny) {
+        let order = if self.cache.borrow().order_exists(&event.client_order_id()) {
+            match self.cache.borrow_mut().update_order(event) {
+                Ok(order) => Some(order),
+                Err(e) => {
+                    log::error!("Failed to apply command denial: {e}");
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
+        self.send_order_update_to_portfolio(event);
+        self.publish_order_event(event);
+
+        if self.config.snapshot_orders
+            && let Some(order) = order
+        {
+            self.create_order_state_snapshot(&order);
+        }
+    }
+
     fn get_or_init_own_order_book(&self, instrument_id: &InstrumentId) -> RefMut<'_, OwnOrderBook> {
         let mut cache = self.cache.borrow_mut();
         if cache.own_order_book_mut(instrument_id).is_none() {
@@ -5406,16 +5551,7 @@ mod tests {
             panic!("Expected initialized order");
         };
 
-        let result = engine.materialize_external_order(
-            initialized,
-            claimant_id,
-            venue_order_id,
-            instrument.id(),
-            order.strategy_id(),
-            UnixNanos::default(),
-            None,
-            None,
-        );
+        let result = engine.materialize_external_order(initialized, venue_order_id, None, None);
 
         assert!(result.is_none());
         assert!(!cache.borrow().order_exists(&claimant_id));

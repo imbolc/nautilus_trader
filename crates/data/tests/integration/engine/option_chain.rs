@@ -157,8 +157,12 @@ fn test_reset_clears_book_and_option_chain_state_and_allows_resubscribe(
 }
 
 #[rstest]
+#[case::running(false, false)]
+#[case::stopped_after_first(true, false)]
+#[case::stopped_before_first(true, true)]
 fn test_external_option_chain_releases_after_final_owner(
-    #[values(false, true)] stopped: bool,
+    #[case] stopped: bool,
+    #[case] initially_stopped: bool,
     _stub_msgbus: Rc<RefCell<MessageBus>>,
     client_id: ClientId,
     venue: Venue,
@@ -196,6 +200,10 @@ fn test_external_option_chain_releases_after_final_owner(
     msgbus::subscribe_any(topic.as_str().into(), subscribe_handler, None);
     msgbus::subscribe_any(topic.as_str().into(), unsubscribe_handler, None);
 
+    if initially_stopped {
+        data_engine.stop();
+    }
+
     data_engine.execute(DataCommand::Subscribe(subscribe(
         UUID4::new(),
         "50000",
@@ -213,7 +221,13 @@ fn test_external_option_chain_releases_after_final_owner(
     )));
     assert_eq!(
         subscribe_saver.get_messages().len(),
-        if stopped { 1 } else { 2 }
+        if initially_stopped {
+            0
+        } else if stopped {
+            1
+        } else {
+            2
+        }
     );
 
     data_engine.execute(DataCommand::Unsubscribe(UnsubscribeCommand::OptionChain(
@@ -225,7 +239,10 @@ fn test_external_option_chain_releases_after_final_owner(
             Some(venue),
         ),
     )));
-    assert!(unsubscribe_saver.get_messages().is_empty());
+    assert_eq!(
+        unsubscribe_saver.get_messages().len(),
+        usize::from(initially_stopped),
+    );
 
     data_engine.execute(DataCommand::Unsubscribe(UnsubscribeCommand::OptionChain(
         UnsubscribeOptionChain::new(
@@ -237,6 +254,11 @@ fn test_external_option_chain_releases_after_final_owner(
         ),
     )));
     let commands = unsubscribe_saver.get_messages();
+
+    if initially_stopped {
+        assert_eq!(commands.len(), 2);
+        return;
+    }
 
     let [UnsubscribeCommand::OptionChain(command)] = commands.as_slice() else {
         panic!("expected one final external option chain unsubscribe, was {commands:?}");
@@ -639,6 +661,70 @@ fn test_subscribe_option_chain_filters_by_underlying(
         .filter(|cmd| matches!(cmd, DataCommand::Subscribe(SubscribeCommand::Quotes(_))))
         .count();
     assert_eq!(subscribe_count, 1, "Only BTC option should be subscribed");
+}
+
+#[rstest]
+fn test_stopped_option_chain_does_not_retain_new_subscriptions(
+    clock: Rc<RefCell<VirtualClock>>,
+    cache: Rc<RefCell<Cache>>,
+) {
+    let data_engine = make_option_chain_engine(Rc::clone(&clock), Rc::clone(&cache));
+    let client_id = ClientId::new("DERIBIT");
+    let venue = Venue::new("DERIBIT");
+    let recorder = Rc::new(RefCell::new(Vec::new()));
+    register_mock_client(
+        clock,
+        Rc::clone(&cache),
+        client_id,
+        venue,
+        Some(venue),
+        &recorder,
+        &mut data_engine.borrow_mut(),
+    );
+    let call = make_btc_option("50000.000", OptionKind::Call);
+    let call_id = call.id();
+    cache.borrow_mut().add_instrument(call).unwrap();
+    let series_id = make_series_id();
+
+    data_engine.borrow_mut().stop();
+    data_engine
+        .borrow_mut()
+        .execute(make_subscribe_option_chain(
+            series_id,
+            vec![Price::from("50000.000")],
+            Some(client_id),
+            Some(venue),
+        ));
+    let put = make_btc_option("50000.000", OptionKind::Put);
+    let put_id = put.id();
+    data_engine.borrow_mut().process(&put);
+
+    assert_eq!(cache.borrow().instrument(&put_id), Some(&put));
+    assert!(!data_engine.borrow().has_option_chain_manager(&series_id));
+
+    for instrument_id in [call_id, put_id] {
+        let topic = switchboard::get_quotes_topic(instrument_id);
+        assert_eq!(msgbus::exact_subscriber_count_quotes(topic), 0);
+    }
+
+    assert!(recorder.borrow().is_empty());
+
+    data_engine
+        .borrow_mut()
+        .execute(make_unsubscribe_option_chain(
+            series_id,
+            Some(client_id),
+            Some(venue),
+        ));
+    data_engine.borrow_mut().start();
+    assert!(!data_engine.borrow().has_option_chain_manager(&series_id));
+
+    for instrument_id in [call_id, put_id] {
+        let topic = switchboard::get_quotes_topic(instrument_id);
+        assert_eq!(msgbus::exact_subscriber_count_quotes(topic), 0);
+    }
+
+    assert!(recorder.borrow().is_empty());
 }
 
 #[rstest]
@@ -2385,6 +2471,7 @@ fn test_unsubscribe_option_chain_preserves_user_owned_bootstrap_greeks(
 #[case::typed_any(OptionGreeksDispatch::TypedAny)]
 #[case::data_borrowed(OptionGreeksDispatch::DataBorrowed)]
 fn test_option_chain_deferred_bootstrap_from_greeks_keeps_bootstrap_event(
+    #[values(false, true)] stopped: bool,
     #[case] dispatch: OptionGreeksDispatch,
     clock: Rc<RefCell<VirtualClock>>,
     cache: Rc<RefCell<Cache>>,
@@ -2481,6 +2568,10 @@ fn test_option_chain_deferred_bootstrap_from_greeks_keeps_bootstrap_event(
 
     recorder.borrow_mut().clear();
 
+    if stopped {
+        data_engine.borrow_mut().stop();
+    }
+
     let call_id = InstrumentId::from("BTC-20240101-50000.000-C.DERIBIT");
     let greeks = make_option_chain_greeks(call_id, 50000.0);
 
@@ -2520,9 +2611,9 @@ fn test_option_chain_deferred_bootstrap_from_greeks_keeps_bootstrap_event(
         })
         .count();
 
-    assert_eq!(quote_subs, 6);
-    assert_eq!(greeks_subs, 5);
-    assert_eq!(status_subs, 6);
+    assert_eq!(quote_subs, if stopped { 0 } else { 6 });
+    assert_eq!(greeks_subs, if stopped { 0 } else { 5 });
+    assert_eq!(status_subs, if stopped { 0 } else { 6 });
     drop(recorded);
 
     assert!(saver.get_messages().is_empty());

@@ -46,13 +46,16 @@ use nautilus_common::{
     cache::Cache,
     clients::ExecutionClient,
     clock::VirtualClock,
-    live::runner::{replace_system_event_sender, set_exec_event_sender},
+    live::runner::{
+        replace_exec_event_sender, replace_system_event_sender, set_exec_event_sender,
+        try_get_exec_event_sender,
+    },
     messages::{
         ExecutionEvent, SystemEvent,
         execution::{
             BatchCancelOrders, CancelAllOrders, CancelOrder, ExecutionReport, GenerateFillReports,
-            GenerateOrderStatusReport, GeneratePositionStatusReports, ModifyOrder, SubmitOrder,
-            SubmitOrderList,
+            GenerateOrderStatusReport, GenerateOrderStatusReports, GeneratePositionStatusReports,
+            ModifyOrder, SubmitOrder, SubmitOrderList,
         },
         system::SocketState,
     },
@@ -158,6 +161,8 @@ struct TestServerState {
     order_lookup_responses: Arc<tokio::sync::Mutex<HashMap<String, (StatusCode, Value)>>>,
     order_lookup_requests: Arc<tokio::sync::Mutex<Vec<Value>>>,
     user_trades_result: Arc<tokio::sync::Mutex<Value>>,
+    positions_result: Arc<tokio::sync::Mutex<Option<Value>>>,
+    instrument_requests: Arc<AtomicUsize>,
 }
 
 async fn handle_jsonrpc_request(
@@ -171,8 +176,32 @@ async fn handle_jsonrpc_request(
     match method {
         "public/get_instruments" => handle_get_instruments(id, params).await,
         "public/get_instrument" => {
-            let mut data = load_json("http_get_instrument.json");
-            data["id"] = json!(id);
+            state.instrument_requests.fetch_add(1, Ordering::Relaxed);
+            let name = params
+                .as_ref()
+                .and_then(|value| value.get("instrument_name"))
+                .and_then(|value| value.as_str());
+
+            let mut data = if name == Some("BTC_USDC") {
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": load_json("http_get_instrument_routed_spot.json"),
+                    "usOut": 1_765_297_564_479_750_u64,
+                    "testnet": true
+                })
+            } else {
+                let mut future = load_json("http_get_instrument.json");
+                future["id"] = json!(id);
+                future
+            };
+
+            if let Some(name) = name
+                && let Some(result) = data.get_mut("result")
+            {
+                result["instrument_name"] = json!(name);
+            }
+
             Json(data).into_response()
         }
         "private/get_account_summaries" => {
@@ -207,7 +236,12 @@ async fn handle_jsonrpc_request(
             (status, Json(response)).into_response()
         }
         "private/get_positions" => {
-            let mut data = load_json("http_get_positions.json");
+            let mut data = if let Some(result) = state.positions_result.lock().await.clone() {
+                json!({"jsonrpc": "2.0", "result": result})
+            } else {
+                load_json("http_get_positions.json")
+            };
+
             data["id"] = json!(id);
             Json(data).into_response()
         }
@@ -238,6 +272,22 @@ async fn handle_get_instruments(id: u64, params: Option<Value>) -> Response {
         Some("any" | "BTC") | None => {
             let mut data = load_json("http_get_instruments.json");
             data["id"] = json!(id);
+
+            if let Some(kind) = params
+                .as_ref()
+                .and_then(|p| p.get("kind"))
+                .and_then(|k| k.as_str())
+                && kind == "spot"
+            {
+                return Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": [load_json("http_get_instrument_routed_spot.json")],
+                    "usOut": 1_765_297_564_479_750_u64,
+                    "testnet": true
+                }))
+                .into_response();
+            }
 
             if let Some(kind) = params
                 .as_ref()
@@ -503,12 +553,20 @@ async fn send_command_response(
     response_kind: CommandResponse,
     success_result: &Value,
 ) -> bool {
-    let Some(response) = command_response(id, response_kind, success_result) else {
-        return true;
-    };
+    if let Some(response) = command_response(id, response_kind, success_result)
+        && socket
+            .send(Message::Text(response.to_string().into()))
+            .await
+            .is_err()
+    {
+        return false;
+    }
 
+    // The portfolio update marks the end of this command's ordered event stream
     socket
-        .send(Message::Text(response.to_string().into()))
+        .send(Message::Text(
+            load_json("ws_portfolio.json").to_string().into(),
+        ))
         .await
         .is_ok()
 }
@@ -623,12 +681,13 @@ async fn user_trades_response(
             .and_then(|value| value.get("currency"))
             .and_then(|value| value.as_str())
         {
-            let prefix = format!("{currency}-");
+            let hyphen = format!("{currency}-");
+            let spot = format!("{currency}_");
             trades.retain(|trade| {
                 trade
                     .get("instrument_name")
                     .and_then(|value| value.as_str())
-                    .is_some_and(|name| name.starts_with(&prefix))
+                    .is_some_and(|name| name.starts_with(&hyphen) || name.starts_with(&spot))
             });
         }
     }
@@ -694,8 +753,8 @@ fn create_test_exec_config(addr: SocketAddr) -> DeribitExecutionClientConfig {
     }
 }
 
-fn create_test_execution_client(
-    addr: SocketAddr,
+fn create_test_execution_client_with_config(
+    config: DeribitExecutionClientConfig,
 ) -> (
     DeribitExecutionClient,
     tokio::sync::mpsc::UnboundedReceiver<ExecutionEvent>,
@@ -718,15 +777,27 @@ fn create_test_execution_client(
         cache.clone(),
     );
 
-    let config = create_test_exec_config(addr);
-
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    set_exec_event_sender(tx);
+    if try_get_exec_event_sender().is_none() {
+        set_exec_event_sender(tx);
+    } else {
+        replace_exec_event_sender(tx);
+    }
 
     let mut client = DeribitExecutionClient::new(core, config).unwrap();
     client.start().unwrap();
 
     (client, rx, cache)
+}
+
+fn create_test_execution_client(
+    addr: SocketAddr,
+) -> (
+    DeribitExecutionClient,
+    tokio::sync::mpsc::UnboundedReceiver<ExecutionEvent>,
+    Rc<RefCell<Cache>>,
+) {
+    create_test_execution_client_with_config(create_test_exec_config(addr))
 }
 
 fn add_test_account_to_cache(cache: &Rc<RefCell<Cache>>, account_id: AccountId) {
@@ -882,17 +953,12 @@ async fn test_exec_client_connect_emits_account_state() {
 #[case::client_empty("empty", false, true, Some("inconclusive"))]
 #[case::client_uncached("uncached", false, true, Some("inconclusive"))]
 #[case::client_parse_failure("parse", false, true, Some("inconclusive"))]
-#[case::client_unscoped_uncached("uncached", false, false, Some("inconclusive"))]
+#[case::client_unscoped_uncached("uncached", false, false, Some("unresolved instrument"))]
 #[case::client_unscoped_parse_failure("parse", false, false, Some("inconclusive"))]
 #[case::client_auth_failure("auth", false, true, Some("13004"))]
 #[case::client_absence_error("absent", false, true, Some("10004"))]
 #[case::client_malformed("malformed", false, true, Some("JSON error"))]
-#[case::client_wrong_instrument(
-    "wrong_instrument",
-    false,
-    true,
-    Some("instrument_id=BTC-27DEC24.DERIBIT")
-)]
+#[case::client_wrong_instrument("wrong_instrument", false, true, Some("inconclusive"))]
 #[tokio::test]
 async fn test_generate_order_status_report(
     #[case] scenario: &str,
@@ -1138,15 +1204,7 @@ async fn test_generate_position_status_reports_with_fractional_leverage() {
 
     client.connect().await.unwrap();
 
-    let cmd = GeneratePositionStatusReports::new(
-        UUID4::new(),
-        UnixNanos::default(),
-        None,
-        None,
-        None,
-        None,
-        None,
-    );
+    let cmd = position_reports_command(None);
 
     let reports = client.generate_position_status_reports(&cmd).await.unwrap();
 
@@ -1163,44 +1221,21 @@ async fn test_generate_position_status_reports_with_fractional_leverage() {
 }
 
 #[rstest]
+#[case::ambiguous(CommandResponse::AmbiguousFailure, "ambiguous-submit-test-001")]
+#[case::malformed(CommandResponse::MalformedSuccess, "parse-fail-submit-test-001")]
 #[tokio::test]
-async fn test_ambiguous_submit_failure_does_not_emit_order_rejected() {
+async fn test_non_definitive_submit_failure_does_not_emit_order_rejected(
+    #[case] response: CommandResponse,
+    #[case] client_order_id: &str,
+) {
     let (client, mut rx, cache, request_count) =
         connected_client_with_command_responses(CommandResponses {
-            submit: CommandResponse::AmbiguousFailure,
+            submit: response,
             ..Default::default()
         })
         .await;
 
-    let client_order_id = ClientOrderId::new("ambiguous-submit-test-001");
-    let order_any = add_limit_order_to_cache(&cache, client_order_id, TimeInForce::Gtc);
-
-    client
-        .submit_order(submit_order_command(&order_any))
-        .unwrap();
-
-    wait_for_command_requests(&request_count, 1).await;
-
-    assert_no_order_event_matching(&mut rx, |event| {
-        matches!(
-            event,
-            OrderEventAny::Rejected(event) if event.client_order_id == client_order_id
-        )
-    })
-    .await;
-}
-
-#[rstest]
-#[tokio::test]
-async fn test_submit_response_parse_failure_does_not_emit_order_rejected() {
-    let (client, mut rx, cache, request_count) =
-        connected_client_with_command_responses(CommandResponses {
-            submit: CommandResponse::MalformedSuccess,
-            ..Default::default()
-        })
-        .await;
-
-    let client_order_id = ClientOrderId::new("parse-fail-submit-test-001");
+    let client_order_id = ClientOrderId::new(client_order_id);
     let order_any = add_limit_order_to_cache(&cache, client_order_id, TimeInForce::Gtc);
 
     client
@@ -1250,9 +1285,87 @@ async fn test_explicit_venue_submit_rejection_emits_order_rejected() {
         ExecutionEvent::Order(OrderEventAny::Rejected(event)) => {
             assert_eq!(event.client_order_id, client_order_id);
             assert!(event.reason.contains("post_only_reject"));
+            assert!(!event.due_post_only);
         }
         other => panic!("Expected Rejected event, was {other:?}"),
     }
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_post_only_venue_code_sets_due_post_only_once() {
+    let (client, mut rx, cache, request_count) =
+        connected_client_with_command_responses(CommandResponses {
+            submit: CommandResponse::VenueReject {
+                code: 11054,
+                message: "post_only_reject",
+            },
+            ..Default::default()
+        })
+        .await;
+
+    let client_order_id = ClientOrderId::new("post-only-code-001");
+    let order_any = add_limit_order_to_cache(&cache, client_order_id, TimeInForce::Gtc);
+
+    client
+        .submit_order(submit_order_command(&order_any))
+        .unwrap();
+
+    match recv_until(&mut rx, |event| {
+        matches!(
+            event,
+            ExecutionEvent::Order(OrderEventAny::Rejected(event))
+                if event.client_order_id == client_order_id
+        )
+    })
+    .await
+    {
+        ExecutionEvent::Order(OrderEventAny::Rejected(event)) => {
+            assert_eq!(event.reason.as_str(), "post_only_reject");
+            assert!(event.due_post_only);
+        }
+        other => panic!("Expected Rejected event, was {other:?}"),
+    }
+
+    assert_eq!(request_count.load(Ordering::Relaxed), 1);
+    assert_no_order_event_matching(&mut rx, |event| {
+        matches!(
+            event,
+            OrderEventAny::Rejected(event) if event.client_order_id == client_order_id
+        )
+    })
+    .await;
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_rate_limit_submit_stays_in_flight() {
+    let (client, mut rx, cache, request_count) =
+        connected_client_with_command_responses(CommandResponses {
+            submit: CommandResponse::VenueReject {
+                code: 10028,
+                message: "too_many_requests",
+            },
+            ..Default::default()
+        })
+        .await;
+
+    let client_order_id = ClientOrderId::new("rate-limit-submit-001");
+    let order_any = add_limit_order_to_cache(&cache, client_order_id, TimeInForce::Gtc);
+
+    client
+        .submit_order(submit_order_command(&order_any))
+        .unwrap();
+
+    wait_for_command_requests(&request_count, 1).await;
+    assert_eq!(request_count.load(Ordering::Relaxed), 1);
+    assert_no_order_event_matching(&mut rx, |event| {
+        matches!(
+            event,
+            OrderEventAny::Rejected(event) if event.client_order_id == client_order_id
+        )
+    })
+    .await;
 }
 
 #[rstest]
@@ -1562,7 +1675,7 @@ async fn test_modify_sends_exact_number_tokens() {
 
 #[rstest]
 #[tokio::test]
-async fn test_modify_sends_or_rejects_unrepresentable_amount() {
+async fn test_modify_sends_or_denies_unrepresentable_amount() {
     let (addr, state) = start_test_server().await.unwrap();
     let request_count = state.command_request_count.clone();
     let command_request_texts = state.command_request_texts.clone();
@@ -1595,7 +1708,7 @@ async fn test_modify_sends_or_rejects_unrepresentable_amount() {
         );
 
         match recv_until(&mut rx, |event| matches!(event, ExecutionEvent::Order(_))).await {
-            ExecutionEvent::Order(OrderEventAny::ModifyRejected(event)) => {
+            ExecutionEvent::Order(OrderEventAny::ModifyDenied(event)) => {
                 assert_eq!(event.client_order_id, client_order_id);
                 assert_eq!(
                     event.venue_order_id,
@@ -1603,7 +1716,7 @@ async fn test_modify_sends_or_rejects_unrepresentable_amount() {
                 );
                 assert_eq!(event.reason.as_str(), UNREPRESENTABLE_PARAMS_REASON);
             }
-            other => panic!("Expected ModifyRejected event, was {other:?}"),
+            other => panic!("Expected ModifyDenied event, was {other:?}"),
         }
 
         assert_eq!(request_count.load(Ordering::Relaxed), 0);
@@ -1634,7 +1747,8 @@ async fn test_ambiguous_cancel_failure_does_not_emit_cancel_rejected() {
     assert_no_order_event_matching(&mut rx, |event| {
         matches!(
             event,
-            OrderEventAny::CancelRejected(event) if event.client_order_id == client_order_id
+            OrderEventAny::CancelRejected(_) | OrderEventAny::CancelDenied(_)
+                if event.client_order_id() == client_order_id
         )
     })
     .await;
@@ -1679,7 +1793,7 @@ async fn test_explicit_venue_cancel_rejection_emits_cancel_rejected() {
 
 #[rstest]
 #[tokio::test]
-async fn test_local_cancel_validation_failure_does_not_emit_cancel_rejected() {
+async fn test_local_cancel_validation_failure_emits_cancel_denied() {
     let (client, mut rx, cache, request_count) =
         connected_client_with_command_responses(CommandResponses::default()).await;
 
@@ -1689,20 +1803,30 @@ async fn test_local_cancel_validation_failure_does_not_emit_cancel_rejected() {
     let result = client.cancel_order(cancel_order_command_without_venue_order_id(client_order_id));
     assert!(result.is_ok());
 
-    assert_no_order_event_matching(&mut rx, |event| {
+    match recv_until(&mut rx, |event| {
         matches!(
             event,
-            OrderEventAny::CancelRejected(event) if event.client_order_id == client_order_id
+            ExecutionEvent::Order(OrderEventAny::CancelDenied(event))
+                if event.client_order_id == client_order_id
         )
     })
-    .await;
+    .await
+    {
+        ExecutionEvent::Order(OrderEventAny::CancelDenied(event)) => {
+            assert_eq!(
+                event.reason.as_str(),
+                "venue_order_id required for cancel_order"
+            );
+        }
+        other => panic!("Expected CancelDenied event, was {other:?}"),
+    }
 
     assert_eq!(request_count.load(Ordering::Relaxed), 0);
 }
 
 #[rstest]
 #[tokio::test]
-async fn test_local_batch_cancel_validation_failure_does_not_emit_cancel_rejected() {
+async fn test_local_batch_cancel_validation_failure_emits_cancel_denied() {
     let (client, mut rx, cache, request_count) =
         connected_client_with_command_responses(CommandResponses::default()).await;
 
@@ -1722,28 +1846,43 @@ async fn test_local_batch_cancel_validation_failure_does_not_emit_cancel_rejecte
     ));
     assert!(result.is_ok());
 
-    assert_no_order_event_matching(&mut rx, |event| {
+    match recv_until(&mut rx, |event| {
         matches!(
             event,
-            OrderEventAny::CancelRejected(event) if event.client_order_id == client_order_id
+            ExecutionEvent::Order(OrderEventAny::CancelDenied(event))
+                if event.client_order_id == client_order_id
         )
     })
-    .await;
+    .await
+    {
+        ExecutionEvent::Order(OrderEventAny::CancelDenied(event)) => {
+            assert_eq!(
+                event.reason.as_str(),
+                "venue_order_id required for cancel_order"
+            );
+        }
+        other => panic!("Expected CancelDenied event, was {other:?}"),
+    }
 
     assert_eq!(request_count.load(Ordering::Relaxed), 0);
 }
 
 #[rstest]
+#[case::ambiguous(CommandResponse::AmbiguousFailure, "ambiguous-modify-test-001")]
+#[case::malformed(CommandResponse::MalformedSuccess, "parse-fail-modify-test-001")]
 #[tokio::test]
-async fn test_ambiguous_modify_failure_does_not_emit_modify_rejected() {
+async fn test_non_definitive_modify_failure_does_not_emit_modify_rejected(
+    #[case] response: CommandResponse,
+    #[case] client_order_id: &str,
+) {
     let (client, mut rx, cache, request_count) =
         connected_client_with_command_responses(CommandResponses {
-            modify: CommandResponse::AmbiguousFailure,
+            modify: response,
             ..Default::default()
         })
         .await;
 
-    let client_order_id = ClientOrderId::new("ambiguous-modify-test-001");
+    let client_order_id = ClientOrderId::new(client_order_id);
     add_limit_order_to_cache(&cache, client_order_id, TimeInForce::Gtc);
 
     client
@@ -1755,35 +1894,8 @@ async fn test_ambiguous_modify_failure_does_not_emit_modify_rejected() {
     assert_no_order_event_matching(&mut rx, |event| {
         matches!(
             event,
-            OrderEventAny::ModifyRejected(event) if event.client_order_id == client_order_id
-        )
-    })
-    .await;
-}
-
-#[rstest]
-#[tokio::test]
-async fn test_modify_response_parse_failure_does_not_emit_modify_rejected() {
-    let (client, mut rx, cache, request_count) =
-        connected_client_with_command_responses(CommandResponses {
-            modify: CommandResponse::MalformedSuccess,
-            ..Default::default()
-        })
-        .await;
-
-    let client_order_id = ClientOrderId::new("parse-fail-modify-test-001");
-    add_limit_order_to_cache(&cache, client_order_id, TimeInForce::Gtc);
-
-    client
-        .modify_order(modify_order_command(client_order_id))
-        .unwrap();
-
-    wait_for_command_requests(&request_count, 1).await;
-
-    assert_no_order_event_matching(&mut rx, |event| {
-        matches!(
-            event,
-            OrderEventAny::ModifyRejected(event) if event.client_order_id == client_order_id
+            OrderEventAny::ModifyRejected(_) | OrderEventAny::ModifyDenied(_)
+                if event.client_order_id() == client_order_id
         )
     })
     .await;
@@ -1828,7 +1940,7 @@ async fn test_explicit_venue_modify_rejection_emits_modify_rejected() {
 
 #[rstest]
 #[tokio::test]
-async fn test_local_modify_validation_failure_emits_modify_rejected() {
+async fn test_local_modify_validation_failure_emits_modify_denied() {
     let (client, mut rx, cache, _request_count) =
         connected_client_with_command_responses(CommandResponses::default()).await;
 
@@ -1841,23 +1953,23 @@ async fn test_local_modify_validation_failure_emits_modify_rejected() {
     match recv_until(&mut rx, |event| {
         matches!(
             event,
-            ExecutionEvent::Order(OrderEventAny::ModifyRejected(event))
+            ExecutionEvent::Order(OrderEventAny::ModifyDenied(event))
                 if event.client_order_id == client_order_id
         )
     })
     .await
     {
-        ExecutionEvent::Order(OrderEventAny::ModifyRejected(event)) => {
+        ExecutionEvent::Order(OrderEventAny::ModifyDenied(event)) => {
             assert_eq!(event.client_order_id, client_order_id);
             assert!(event.reason.contains("venue_order_id required"));
         }
-        other => panic!("Expected ModifyRejected event, was {other:?}"),
+        other => panic!("Expected ModifyDenied event, was {other:?}"),
     }
 }
 
 #[rstest]
 #[tokio::test]
-async fn test_local_modify_missing_price_emits_modify_rejected() {
+async fn test_local_modify_missing_price_emits_modify_denied() {
     let (client, mut rx, cache, _request_count) =
         connected_client_with_command_responses(CommandResponses::default()).await;
 
@@ -1870,23 +1982,23 @@ async fn test_local_modify_missing_price_emits_modify_rejected() {
     match recv_until(&mut rx, |event| {
         matches!(
             event,
-            ExecutionEvent::Order(OrderEventAny::ModifyRejected(event))
+            ExecutionEvent::Order(OrderEventAny::ModifyDenied(event))
                 if event.client_order_id == client_order_id
         )
     })
     .await
     {
-        ExecutionEvent::Order(OrderEventAny::ModifyRejected(event)) => {
+        ExecutionEvent::Order(OrderEventAny::ModifyDenied(event)) => {
             assert_eq!(event.client_order_id, client_order_id);
             assert!(event.reason.contains("price required"));
         }
-        other => panic!("Expected ModifyRejected event, was {other:?}"),
+        other => panic!("Expected ModifyDenied event, was {other:?}"),
     }
 }
 
 #[rstest]
 #[tokio::test]
-async fn test_local_modify_missing_cached_order_emits_modify_rejected() {
+async fn test_local_modify_missing_cached_order_emits_modify_denied() {
     let (client, mut rx, _cache, _request_count) =
         connected_client_with_command_responses(CommandResponses::default()).await;
 
@@ -1898,17 +2010,17 @@ async fn test_local_modify_missing_cached_order_emits_modify_rejected() {
     match recv_until(&mut rx, |event| {
         matches!(
             event,
-            ExecutionEvent::Order(OrderEventAny::ModifyRejected(event))
+            ExecutionEvent::Order(OrderEventAny::ModifyDenied(event))
                 if event.client_order_id == client_order_id
         )
     })
     .await
     {
-        ExecutionEvent::Order(OrderEventAny::ModifyRejected(event)) => {
+        ExecutionEvent::Order(OrderEventAny::ModifyDenied(event)) => {
             assert_eq!(event.client_order_id, client_order_id);
             assert!(event.reason.contains("Order not found"));
         }
-        other => panic!("Expected ModifyRejected event, was {other:?}"),
+        other => panic!("Expected ModifyDenied event, was {other:?}"),
     }
 }
 
@@ -1940,7 +2052,10 @@ async fn test_whole_cancel_all_failure_does_not_emit_per_order_cancel_rejected()
     wait_for_command_requests(&request_count, 1).await;
 
     assert_no_order_event_matching(&mut rx, |event| {
-        matches!(event, OrderEventAny::CancelRejected(_))
+        matches!(
+            event,
+            OrderEventAny::CancelRejected(_) | OrderEventAny::CancelDenied(_)
+        )
     })
     .await;
 }
@@ -1956,9 +2071,12 @@ async fn connected_client_with_command_responses(
     let (addr, state) = start_test_server().await.unwrap();
     *state.command_responses.lock().await = responses;
     let request_count = state.command_request_count.clone();
-    let (mut client, rx, cache) = create_test_execution_client(addr);
+    let (mut client, mut rx, cache) = create_test_execution_client(addr);
     add_test_account_to_cache(&cache, AccountId::from("DERIBIT-001"));
     client.connect().await.unwrap();
+
+    while rx.try_recv().is_ok() {}
+
     (client, rx, cache, request_count)
 }
 
@@ -2133,18 +2251,10 @@ fn cancel_order_command(client_order_id: ClientOrderId) -> CancelOrder {
 }
 
 fn cancel_order_command_without_venue_order_id(client_order_id: ClientOrderId) -> CancelOrder {
-    CancelOrder::new(
-        test_trader_id(),
-        Some(*DERIBIT_CLIENT_ID),
-        test_strategy_id(),
-        test_instrument_id(),
-        client_order_id,
-        None,
-        UUID4::new(),
-        UnixNanos::default(),
-        None,
-        None,
-    )
+    CancelOrder {
+        venue_order_id: None,
+        ..cancel_order_command(client_order_id)
+    }
 }
 
 fn modify_order_command(client_order_id: ClientOrderId) -> ModifyOrder {
@@ -2170,57 +2280,24 @@ fn sized_modify_order_command(client_order_id: ClientOrderId, quantity: Quantity
 }
 
 fn modify_order_command_without_venue_order_id(client_order_id: ClientOrderId) -> ModifyOrder {
-    ModifyOrder::new(
-        test_trader_id(),
-        Some(*DERIBIT_CLIENT_ID),
-        test_strategy_id(),
-        test_instrument_id(),
-        client_order_id,
-        None,
-        Some(Quantity::from("2")),
-        Some(Price::from("51000.0")),
-        None,
-        UUID4::new(),
-        UnixNanos::default(),
-        None,
-        None,
-    )
+    ModifyOrder {
+        venue_order_id: None,
+        ..modify_order_command(client_order_id)
+    }
 }
 
 fn modify_order_command_without_price(client_order_id: ClientOrderId) -> ModifyOrder {
-    ModifyOrder::new(
-        test_trader_id(),
-        Some(*DERIBIT_CLIENT_ID),
-        test_strategy_id(),
-        test_instrument_id(),
-        client_order_id,
-        Some(VenueOrderId::from("DERIBIT-ORDER-1")),
-        Some(Quantity::from("2")),
-        None,
-        None,
-        UUID4::new(),
-        UnixNanos::default(),
-        None,
-        None,
-    )
+    ModifyOrder {
+        price: None,
+        ..modify_order_command(client_order_id)
+    }
 }
 
 fn modify_order_command_without_quantity(client_order_id: ClientOrderId) -> ModifyOrder {
-    ModifyOrder::new(
-        test_trader_id(),
-        Some(*DERIBIT_CLIENT_ID),
-        test_strategy_id(),
-        test_instrument_id(),
-        client_order_id,
-        Some(VenueOrderId::from("DERIBIT-ORDER-1")),
-        None,
-        Some(Price::from("51000.0")),
-        None,
-        UUID4::new(),
-        UnixNanos::default(),
-        None,
-        None,
-    )
+    ModifyOrder {
+        quantity: None,
+        ..modify_order_command(client_order_id)
+    }
 }
 
 fn cancel_all_orders_command() -> CancelAllOrders {
@@ -2251,21 +2328,27 @@ async fn assert_no_order_event_matching<F>(
 ) where
     F: Fn(&OrderEventAny) -> bool,
 {
-    let unexpected = tokio::time::timeout(Duration::from_millis(500), async {
+    tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let event = rx.recv().await.expect("Execution event channel closed");
             if let ExecutionEvent::Order(order_event) = &event
                 && predicate(order_event)
             {
-                return event;
+                panic!("Unexpected order event: {event:?}");
+            }
+
+            if let ExecutionEvent::Account(state) = event
+                && state
+                    .balances
+                    .iter()
+                    .any(|balance| balance.total == Money::from("55.00055 USDT"))
+            {
+                return;
             }
         }
     })
-    .await;
-
-    if let Ok(event) = unexpected {
-        panic!("Unexpected order event: {event:?}");
-    }
+    .await
+    .expect("Timed out waiting for the command's portfolio update");
 }
 
 async fn recv_until<F>(
@@ -2456,7 +2539,7 @@ async fn cached_http_client(addr: SocketAddr) -> DeribitHttpClient {
 
 #[rstest]
 #[tokio::test]
-async fn test_request_fill_reports_preserves_empty_history_and_out_of_scope_trades() {
+async fn test_request_fill_reports_fails_in_scope_historical_miss() {
     let (addr, state) = start_test_server().await.unwrap();
     let client = cached_http_client(addr).await;
     let account_id = AccountId::from("DERIBIT-001");
@@ -2480,7 +2563,7 @@ async fn test_request_fill_reports_preserves_empty_history_and_out_of_scope_trad
     let unscoped = client
         .request_fill_reports(account_id, None, None, None)
         .await
-        .expect("uncached commission failure stays out of scope");
+        .expect_err("in-scope historical miss must not look complete");
     let scoped = client
         .request_fill_reports(account_id, Some(instrument_id), None, None)
         .await
@@ -2493,13 +2576,434 @@ async fn test_request_fill_reports_preserves_empty_history_and_out_of_scope_trad
             None,
         )
         .await
-        .expect("uncached instrument request");
+        .expect_err("targeted in-scope historical miss must fail");
 
-    assert_eq!(unscoped.len(), 1);
-    assert_valid_fill(&unscoped[0]);
+    let unscoped_message = unscoped.to_string();
+    assert!(
+        unscoped_message.contains("unresolved historical instruments"),
+        "error was: {unscoped_message}"
+    );
+    assert!(
+        unscoped_message.contains("ETH-PERPETUAL.DERIBIT"),
+        "error was: {unscoped_message}"
+    );
     assert_eq!(scoped.len(), 1);
     assert_valid_fill(&scoped[0]);
-    assert!(uncached.is_empty());
+    assert!(uncached.to_string().contains("ETH-PERPETUAL.DERIBIT"));
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_millis() as u64
+}
+
+fn reconciliation_order(
+    order_id: &str,
+    instrument_name: &str,
+    order_state: &str,
+    ts_ms: u64,
+) -> Value {
+    json!({
+        "label": order_id,
+        "price": "50000.0",
+        "amount": "10",
+        "direction": "buy",
+        "time_in_force": "good_til_cancelled",
+        "instrument_name": instrument_name,
+        "api": true,
+        "order_id": order_id,
+        "creation_timestamp": ts_ms,
+        "filled_amount": 0.0,
+        "last_update_timestamp": ts_ms,
+        "post_only": false,
+        "reduce_only": false,
+        "average_price": 0.0,
+        "order_state": order_state,
+        "order_type": "limit",
+    })
+}
+
+fn reconciliation_position(instrument_name: &str, size: i64) -> Value {
+    let mut position = load_json("http_get_positions.json")["result"][0].clone();
+    position["instrument_name"] = json!(instrument_name);
+    position["size"] = json!(size);
+    position
+}
+
+fn btc_scope() -> Vec<InstrumentId> {
+    vec![InstrumentId::from("BTC-PERPETUAL.DERIBIT")]
+}
+
+async fn set_open_orders(state: &TestServerState, orders: &[Value]) {
+    state.order_lookup_responses.lock().await.insert(
+        "private/get_open_orders".to_string(),
+        (StatusCode::OK, json!({"result": orders})),
+    );
+}
+
+async fn connect_scoped_client(
+    addr: SocketAddr,
+    load_ids: Option<Vec<InstrumentId>>,
+) -> DeribitExecutionClient {
+    let mut config = create_test_exec_config(addr);
+    config.load_ids = load_ids;
+    let (mut client, _rx, cache) = create_test_execution_client_with_config(config);
+    add_test_account_to_cache(&cache, AccountId::from("DERIBIT-001"));
+    client.connect().await.expect("connect");
+    client
+}
+
+fn order_reports_command(open_only: bool) -> GenerateOrderStatusReports {
+    GenerateOrderStatusReports::new(
+        UUID4::new(),
+        UnixNanos::default(),
+        open_only,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+}
+
+fn position_reports_command(instrument_id: Option<InstrumentId>) -> GeneratePositionStatusReports {
+    GeneratePositionStatusReports::new(
+        UUID4::new(),
+        UnixNanos::default(),
+        instrument_id,
+        None,
+        None,
+        None,
+        None,
+    )
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_bulk_reconciliation_classifies_mixed_instrument_misses() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let btc = InstrumentId::from("BTC-PERPETUAL.DERIBIT");
+    let ts_ms = now_millis();
+    set_open_orders(
+        &state,
+        &[
+            reconciliation_order("BTC-OPEN", "BTC-PERPETUAL", "open", ts_ms),
+            reconciliation_order("ETH-OPEN", "ETH-PERPETUAL", "open", ts_ms),
+        ],
+    )
+    .await;
+    *state.positions_result.lock().await = Some(json!([
+        reconciliation_position("BTC-PERPETUAL", 50),
+        reconciliation_position("ETH-PERPETUAL", 2),
+    ]));
+    let mut recent_eth = uncached_eth_trade();
+    recent_eth["timestamp"] = json!(ts_ms);
+    *state.user_trades_result.lock().await =
+        trades_result(&[valid_btc_trade(), recent_eth.clone()]);
+
+    let mut scoped = connect_scoped_client(addr, Some(btc_scope())).await;
+    let orders = scoped
+        .generate_order_status_reports(&order_reports_command(true))
+        .await
+        .expect("out-of-scope open order is omitted");
+    let fills = scoped
+        .generate_fill_reports(fill_command(None, None))
+        .await
+        .expect("out-of-scope fill is omitted");
+    let positions = scoped
+        .generate_position_status_reports(&position_reports_command(None))
+        .await
+        .expect("out-of-scope position is omitted");
+    let mass_status = scoped
+        .generate_mass_status(Some(60))
+        .await
+        .expect("complete scoped mass status")
+        .expect("mass status");
+    scoped.disconnect().await.unwrap();
+
+    assert_eq!(orders.len(), 1);
+    assert_eq!(orders[0].instrument_id, btc);
+    assert_eq!(orders[0].venue_order_id, VenueOrderId::from("BTC-OPEN"));
+    assert_eq!(fills.len(), 1);
+    assert_valid_fill(&fills[0]);
+    assert_eq!(positions.len(), 1);
+    assert_eq!(positions[0].instrument_id, btc);
+    assert!(mass_status.reports_complete());
+    assert_eq!(mass_status.lookback_start(), None);
+
+    let mut open_miss = connect_scoped_client(addr, None).await;
+    let open_error = open_miss
+        .generate_order_status_reports(&order_reports_command(true))
+        .await
+        .expect_err("in-scope open miss fails the request");
+    let position_error = open_miss
+        .generate_position_status_reports(&position_reports_command(None))
+        .await
+        .expect_err("in-scope position miss fails the request");
+    let targeted = open_miss
+        .generate_position_status_reports(&position_reports_command(Some(btc)))
+        .await
+        .expect("unrelated position miss does not poison a targeted query");
+    let fill_error = open_miss
+        .generate_fill_reports(fill_command(None, None))
+        .await
+        .expect_err("in-scope historical fill miss fails a direct request");
+    *state.positions_result.lock().await =
+        Some(json!([reconciliation_position("BTC-PERPETUAL", 50)]));
+    set_open_orders(&state, &[]).await;
+    let mass_status = open_miss
+        .generate_mass_status(Some(60))
+        .await
+        .expect("bounded historical miss returns the other reports")
+        .expect("mass status");
+    open_miss.disconnect().await.unwrap();
+
+    let open_message = open_error.to_string();
+    assert!(
+        open_message
+            .contains("Open order ETH-OPEN has unresolved instrument ETH-PERPETUAL.DERIBIT"),
+        "error was: {open_message}"
+    );
+    assert!(
+        position_error
+            .to_string()
+            .contains("Position has unresolved instrument ETH-PERPETUAL.DERIBIT")
+    );
+    assert_eq!(targeted.len(), 1);
+    assert_eq!(targeted[0].instrument_id, btc);
+    assert!(
+        fill_error
+            .to_string()
+            .contains("unresolved historical instruments: ETH-PERPETUAL.DERIBIT"),
+        "error was: {fill_error}"
+    );
+    assert!(!mass_status.reports_complete());
+    assert!(mass_status.lookback_start().is_some());
+    assert_eq!(
+        mass_status
+            .fill_reports()
+            .get(&VenueOrderId::from("BTC-ORDER-VALID"))
+            .map(Vec::len),
+        Some(1)
+    );
+    assert!(
+        mass_status
+            .fill_reports()
+            .get(&VenueOrderId::from("ETH-ORDER-BAD"))
+            .is_none()
+    );
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_explicit_scope_omits_cached_out_of_scope_orders() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let ts_ms = now_millis();
+    set_open_orders(
+        &state,
+        &[
+            reconciliation_order("BTC-OPEN", "BTC-PERPETUAL", "open", ts_ms),
+            reconciliation_order("BTC-DATED", "BTC-27DEC24", "open", ts_ms),
+        ],
+    )
+    .await;
+    let mut client = connect_scoped_client(addr, Some(btc_scope())).await;
+
+    let orders = client
+        .generate_order_status_reports(&order_reports_command(true))
+        .await
+        .expect("cached out-of-scope order is omitted");
+    client.disconnect().await.unwrap();
+
+    assert_eq!(orders.len(), 1);
+    assert_eq!(
+        orders[0].instrument_id,
+        InstrumentId::from("BTC-PERPETUAL.DERIBIT")
+    );
+    assert_eq!(orders[0].venue_order_id, VenueOrderId::from("BTC-OPEN"));
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_flat_uncached_position_does_not_fail_reconciliation() {
+    let (addr, state) = start_test_server().await.unwrap();
+    *state.positions_result.lock().await =
+        Some(json!([reconciliation_position("ETH-PERPETUAL", 0)]));
+    let mut client = connect_scoped_client(addr, None).await;
+
+    let reports = client
+        .generate_position_status_reports(&position_reports_command(None))
+        .await
+        .expect("flat position is omitted before instrument resolution");
+    client.disconnect().await.unwrap();
+
+    assert!(reports.is_empty());
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_incomplete_window_emits_flat_report_for_closed_cached_position() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let ts_ms = now_millis();
+    let mut recent_btc = valid_btc_trade();
+    recent_btc["timestamp"] = json!(ts_ms);
+    let mut recent_eth = uncached_eth_trade();
+    recent_eth["timestamp"] = json!(ts_ms);
+    *state.user_trades_result.lock().await = trades_result(&[recent_btc, recent_eth]);
+    *state.positions_result.lock().await = Some(json!([]));
+    let mut client = connect_scoped_client(addr, None).await;
+
+    let mass_status = client
+        .generate_mass_status(Some(60))
+        .await
+        .expect("bounded historical miss keeps the cached fill")
+        .expect("mass status");
+    client.disconnect().await.unwrap();
+
+    let btc = InstrumentId::from("BTC-PERPETUAL.DERIBIT");
+    let reports = mass_status
+        .position_reports()
+        .get(&btc)
+        .cloned()
+        .expect("closed cached instrument has an explicit flat report");
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].instrument_id, btc);
+    assert_eq!(reports[0].quantity, Quantity::from("0"));
+    assert!(!mass_status.reports_complete());
+    assert!(mass_status.lookback_start().is_some());
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_incomplete_window_does_not_flatten_spot() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let ts_ms = now_millis();
+    let mut spot = valid_btc_trade();
+    spot["instrument_name"] = json!("BTC_USDC");
+    spot["trade_id"] = json!("SPOT-1");
+    spot["order_id"] = json!("SPOT-ORDER");
+    spot["timestamp"] = json!(ts_ms);
+    let mut recent_eth = uncached_eth_trade();
+    recent_eth["timestamp"] = json!(ts_ms);
+    *state.user_trades_result.lock().await = trades_result(&[spot, recent_eth]);
+    *state.positions_result.lock().await = Some(json!([]));
+    let mut config = create_test_exec_config(addr);
+    config.product_types = vec![DeribitProductType::Future, DeribitProductType::Spot];
+    let (mut client, _rx, cache) = create_test_execution_client_with_config(config);
+    add_test_account_to_cache(&cache, AccountId::from("DERIBIT-001"));
+    client.connect().await.expect("connect");
+
+    let mass_status = client
+        .generate_mass_status(Some(60))
+        .await
+        .expect("spot fill stays in the incomplete window")
+        .expect("mass status");
+    client.disconnect().await.unwrap();
+
+    let spot_id = InstrumentId::from("BTC_USDC.DERIBIT");
+    let spot_fills = mass_status
+        .fill_reports()
+        .values()
+        .flatten()
+        .filter(|fill| fill.instrument_id == spot_id)
+        .count();
+    assert_eq!(spot_fills, 1);
+    assert!(mass_status.position_reports().get(&spot_id).is_none());
+    assert!(!mass_status.reports_complete());
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_historical_miss_outside_window_and_commission_stay_distinct() {
+    let (addr, state) = start_test_server().await.unwrap();
+    *state.user_trades_result.lock().await =
+        trades_result(&[uncached_eth_trade(), bad_btc_trade(UNREPRESENTABLE_FEE)]);
+    let mut client = connect_scoped_client(addr, None).await;
+
+    let commission_error = client
+        .generate_fill_reports(fill_command(None, None))
+        .await
+        .expect_err("commission failure still fails the request");
+    let unbounded = client
+        .generate_mass_status(None)
+        .await
+        .expect_err("commission failure is not incomplete history");
+    client.disconnect().await.unwrap();
+
+    assert_commission_failure(&commission_error);
+    assert_commission_failure(&unbounded);
+
+    *state.user_trades_result.lock().await = trades_result(&[uncached_eth_trade()]);
+    let mut client = connect_scoped_client(addr, None).await;
+    let mass_status = client
+        .generate_mass_status(Some(60))
+        .await
+        .expect("old historical miss is outside the bounded window")
+        .expect("mass status");
+    let unbounded = client
+        .generate_mass_status(None)
+        .await
+        .expect("unbounded historical miss stays a warning")
+        .expect("mass status");
+    client.disconnect().await.unwrap();
+
+    assert!(mass_status.reports_complete());
+    assert_eq!(mass_status.lookback_start(), None);
+    assert!(unbounded.reports_complete());
+    assert_eq!(unbounded.lookback_start(), None);
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_expired_order_miss_is_historical() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let client = cached_http_client(addr).await;
+    state.order_lookup_responses.lock().await.insert(
+        "private/get_order_history_by_currency".to_string(),
+        (
+            StatusCode::OK,
+            json!({"result": [reconciliation_order(
+                "ETH-EXPIRED",
+                "ETH-PERPETUAL",
+                "expired",
+                now_millis(),
+            )]}),
+        ),
+    );
+
+    let error = client
+        .request_order_status_reports(AccountId::from("DERIBIT-001"), None, None, None, false)
+        .await
+        .expect_err("expired miss is historical");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("unresolved historical instruments: ETH-PERPETUAL.DERIBIT"),
+        "error was: {message}"
+    );
+    assert!(!message.contains("Open order"));
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_connect_loads_required_instruments_before_reports() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let mut client = connect_scoped_client(
+        addr,
+        Some(vec![InstrumentId::from("ETH-PERPETUAL.DERIBIT")]),
+    )
+    .await;
+    let loaded = state.instrument_requests.load(Ordering::Relaxed);
+
+    let _ = client
+        .generate_position_status_reports(&position_reports_command(None))
+        .await;
+    client.disconnect().await.unwrap();
+
+    assert_eq!(loaded, 1);
+    assert_eq!(state.instrument_requests.load(Ordering::Relaxed), loaded);
 }
 
 #[rstest]

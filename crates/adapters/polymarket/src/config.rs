@@ -442,9 +442,9 @@ pub struct PolymarketDataClientConfig {
     #[builder(default = 100)]
     pub auto_load_debounce_ms: u64,
     /// Maximum retry attempts on transient auto-load failures (markets in the CLOB
-    /// hydration window that return empty `clob_token_ids` from Gamma, or that are
-    /// absent from the bulk response). Set to `0` to disable auto-load retries;
-    /// Gamma HTTP requests still use `max_retries`.
+    /// hydration window that return empty protocol-selected outcome IDs from Gamma,
+    /// or that are absent from the bulk response). Set to `0` to disable auto-load
+    /// retries; Gamma HTTP requests still use `max_retries`.
     #[builder(default = 12)]
     pub auto_load_max_retries: u32,
     /// Initial delay (seconds) between transient auto-load retries; backed off

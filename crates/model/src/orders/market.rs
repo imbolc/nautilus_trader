@@ -442,6 +442,14 @@ impl Order for MarketOrder {
         self.core.apply_updated_quantity(event.quantity);
     }
 
+    fn has_pending_update_command(&self) -> bool {
+        self.core.has_pending_update_command()
+    }
+
+    fn has_pending_cancel_command(&self) -> bool {
+        self.core.has_pending_cancel_command()
+    }
+
     fn events(&self) -> Vec<&OrderEventAny> {
         self.events.iter().collect()
     }
@@ -564,7 +572,7 @@ impl TryFrom<OrderInitialized> for MarketOrder {
             event.exec_spawn_id,
             event.tags,
         )?;
-        order.set_init_reconciliation(event.reconciliation);
+        order.set_init_metadata(event.reconciliation, event.causation_id, event.ts_init);
         Ok(order)
     }
 }

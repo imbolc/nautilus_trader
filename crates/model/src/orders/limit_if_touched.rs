@@ -479,6 +479,14 @@ impl Order for LimitIfTouchedOrder {
         &self.commissions
     }
 
+    fn has_pending_update_command(&self) -> bool {
+        self.core.has_pending_update_command()
+    }
+
+    fn has_pending_cancel_command(&self) -> bool {
+        self.core.has_pending_cancel_command()
+    }
+
     fn events(&self) -> Vec<&OrderEventAny> {
         self.events.iter().collect()
     }
@@ -645,7 +653,7 @@ impl TryFrom<OrderInitialized> for LimitIfTouchedOrder {
             event.event_id,
             event.ts_event,
         )?;
-        order.set_init_reconciliation(event.reconciliation);
+        order.set_init_metadata(event.reconciliation, event.causation_id, event.ts_init);
         Ok(order)
     }
 }
