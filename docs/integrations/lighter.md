@@ -600,6 +600,11 @@ The adapter sends both defaults explicitly. Each native group uses one pair for 
 Unknown names, non-string values, and `reduce` with `master_account_index` deny the order before
 submission. Non-default modes require zero integrator fees, which the adapter uses.
 
+Robinhood Mainnet can still reject non-default modes with `21159` (nonzero fees), even with zero integrator
+fees. Use the default modes unless the venue permits the requested settings for the account.
+Rejections without a transaction hash can leave concurrent or batched submissions unresolved. Restart
+and reconcile venue state before managing affected orders again.
+
 **Reduction**: `reduce` nets overlapping quantities without a fill. Working-order quantities and
 reports show the remainder plus actual fills; price-only amendments preserve this quantity.
 
@@ -987,6 +992,7 @@ Create, cancel, modify, grouped orders, and leverage updates include market IDs 
 | Feature              | Perpetuals | Spot | Notes                                                        |
 | -------------------- | ---------- | ---- | ------------------------------------------------------------ |
 | Query open orders    | ✓          | ✓    | REST `accountActiveOrders` scoped by market.                 |
+| Targeted lookup      | ✓          | ✓    | REST `accountOrders` with active/inactive fallback.          |
 | Query order history  | ✓          | ✓    | REST `accountInactiveOrders` with cursor pagination.         |
 | Order status updates | ✓          | ✓    | Private WebSocket order streams plus status reports.         |
 | Trade history        | ✓          | ✓    | REST `trades`; credentials are required for account history. |
@@ -994,6 +1000,16 @@ Create, cancel, modify, grouped orders, and leverage updates include market IDs 
 | Position reports     | ✓          | -    | Perp only; replays cached position stream.                   |
 | Account state        | ✓          | ✓    | Replays the cached merged account state snapshot.            |
 | Mass status          | ✓          | ✓    | Combines orders, fills, and cached positions.                |
+
+- **Targeted lookup**: with a client order ID, the adapter queries `accountOrders` first. If the request
+  fails or finds no match, it queries `accountActiveOrders`, then paginated `accountInactiveOrders` only
+  when the venue order ID is known. A direct response with no match adds one request before fallback;
+  a failed request can also use the shared REST retry policy.
+- **`accountOrders` query**: the raw `LighterAccountOrdersQuery` takes 1 to 20 client-order indexes (the
+  venue limit); targeted lookups send one. Invalid counts are rejected before any HTTP request.
+- **`trades` filters**: the raw `LighterTradesQuery` also accepts `integrator_account_index` and
+  `order_index_str` (Lighter Core, per [API update 184](https://t.me/lighter_api_updates/184)). The venue
+  gives `order_index_str` precedence over `order_index`; use it for indexes above `i64::MAX`.
 
 Authenticated inactive-order and fill pagination rejects repeated cursors and stops after 1,000 pages.
 Fill reconciliation is repeatable across calls and suppresses fills already emitted by WebSocket.
@@ -1050,6 +1066,18 @@ The adapter emits merged `account_all_assets` and `user_stats` state only after 
 
 Construction allows missing credentials, but `connect()` requires `private_key`, `account_index`, and
 `api_key_index`. Private streams and nonce refresh are mandatory.
+
+### Account balances
+
+Each asset's `total` is `balance + margin_balance`. Settlement-currency free balance is the lesser of
+`total - locked_balance` and `max(user_stats.available_balance, 0)`. The remainder is `locked`, including
+margin in use and any funds outside the venue's reported availability.
+
+An account-wide `MarginBalance` reports `initial = max(collateral - available_balance, 0)`. See
+[margin accounts](../concepts/accounting.md#margin-accounts) for initialization and risk checks.
+
+Classic mode keeps spot and perpetual funds separate. Risk checks for both products use this single free
+balance, so a Classic spot order can be denied even when separate spot funds would cover it.
 
 ### Position snapshots and updates
 
@@ -1235,6 +1263,10 @@ non-transaction traffic. Reconcile pending outcomes; do not resend blindly.
 One execution limiter enforces `sendtx_quota_per_min` across WebSocket `sendTx`/`sendTxBatch` trading,
 including account-wide cancellation and schedule control, and startup HTTP `sendTx` integrator approval.
 Raw calls use it when configured, falling back to the raw client's REST limiter otherwise.
+HTTP `sendTx` and `sendTxBatch` responses expose optional `remaining_send_tx`, the transactions still
+available in the venue's rolling minute (Lighter Core, per
+[`sendTx`](https://docs.lighter.xyz/api/transactions/sendtx)). Premium accounts return it; the adapter does
+not use it for pacing, which still uses `sendtx_quota_per_min`.
 
 Clients with identical WebSocket URL strings share a 200-message/minute non-transaction control limiter. The default
 data URL's `readonly=true` separates it from execution. Budget combined control traffic within the per-IP limit.

@@ -729,12 +729,17 @@ Relevant OKX docs:
 | `post_only`   | ✓                     | Only for limit orders.                                |
 | `reduce_only` | ✓                     | See the product and position-mode restrictions below. |
 
-The adapter sends OKX's literal `reduceOnly` field for margin orders in `isolated` or `cross`
-trade mode and for futures or swap orders in `net` position mode. In `long/short` position mode,
+Low-level requests explicitly typed `MARGIN` support OKX's literal `reduceOnly` field in `isolated`
+or `cross` trade mode. Futures and swaps use it in `net` position mode. In `long/short` position mode,
 OKX does not accept that field. The adapter uses the closing `side` and `posSide` combination as
-the enforcing venue instruction instead. It rejects reduce-only orders for cash, option, and event
-products, and rejects a long/short-mode combination that would increase the selected side. See
+the enforcing venue instruction instead. Low-level clients deny a long/short-mode combination
+that would increase the selected side. See
 OKX's [place order documentation](https://www.okx.com/docs-v5/en/#order-book-trading-trade-post-place-order).
+
+The execution client denies reduce-only orders for spot, option, and event products locally with
+`UNSUPPORTED_REDUCE_ONLY`. Spot denial applies in `cash`, `cross`, and `isolated` trade modes.
+For spot closes, pass `reduce_only=False` to `close_position()` or set
+`market_exit_reduce_only=False` for market exits.
 
 ### Time in force
 
@@ -1159,8 +1164,14 @@ Only limit-style orders are supported. OKX does not allow market orders for opti
 | `MARKET`          | -         | Rejected by the adapter before reaching the API. |
 | `MARKET_TO_LIMIT` | -         | Rejected by the adapter before reaching the API. |
 
-Options support FOK and IOC time-in-force. OKX uses a dedicated `op_fok` order type for options FOK orders.
-The adapter handles this mapping automatically.
+Options limit orders support FOK and IOC time-in-force. The adapter sends `fok` for FOK orders through
+both HTTP and WebSocket APIs, as listed in the
+[place-order request parameters](https://www.okx.com/docs-v5/en/#order-book-trading-trade-ws-place-order).
+OKX reports `op_fok` for simple-options orders; the adapter continues to parse these as limit FOK orders.
+
+Options trading requires account activation. Error `51198` indicates that the account must activate
+options through the OKX app or website. This account restriction differs from an invalid `ordType`
+rejection or an accepted FOK order that cancels because liquidity cannot fill its full quantity.
 
 Conditional/algo orders (`STOP_MARKET`, `STOP_LIMIT`, `MARKET_IF_TOUCHED`,
 `LIMIT_IF_TOUCHED`, `TRAILING_STOP_MARKET`) are not supported for options and are denied.
@@ -1468,6 +1479,12 @@ A truncated request fails with the reason `OKX page limit reached before the sta
 and funding rates, request the window again in smaller parts with both `start` and `end` set. An HTTP error,
 or a bar or funding rate that fails to parse, fails the request with the error as the reason and without rows.
 
+Instrument requests answer with a completed `DataResponseEnvelope`, and `update_catalog` writes the definitions
+the catalog does not hold yet. A failed fetch of an instrument type, family, or the spreads, or a definition that
+fails to parse, fails `request_instruments` with the reason and the definitions it could read, which skips
+write-back. The adapter stamps definitions when it fetches them, after any `end` the request can set, so leave `end`
+unset on `request_instruments`: the data engine trims a response to its window, which would drop every definition.
+
 Each data type has its own page limits:
 
 - **Trades**: `GET /api/v5/market/history-trades` returns up to 100 trades a page. The adapter walks back
@@ -1602,6 +1619,18 @@ history:
 Values above 7 days are clamped to the longest complete window across the regular order history
 and spread trade history endpoints used for reconciliation. This is not a limit on all archived data
 available from OKX.
+
+Order reconciliation, including startup, does not infer executions from order status. Executions retain
+the venue trade IDs and fees provided by private updates or fill reports. Queries do not request
+additional fill history. Reconciliation accepts orders while fills are missing, including open orders at
+startup, and applies the venue fills it can obtain. Missing executions and dependent terminal transitions
+remain unresolved when history coverage is incomplete.
+
+To recover missing private executions at runtime, enable `LiveExecutionEngineConfig.open_check_interval_secs`.
+Set `open_check_open_only` to `false` to include terminal orders. Open-order checks and targeted follow-up
+queries request fills when a reported filled quantity exceeds the cached quantity. Missing fills and
+dependent status transitions remain unresolved while venue fill reports are unavailable or incomplete.
+See [Fill reconciliation](../concepts/execution/reconciliation.md#fill-reconciliation).
 
 Periodic position checks treat an absent report as flat only for configured derivative instrument types.
 Spot, margin, and spread instruments do not have complete bulk position coverage, so an absent report
@@ -1772,7 +1801,7 @@ The OKX execution client provides the following Python configuration options.
 | `margin_mode`                      | `None`                     | Margin mode (`ISOLATED` or `CROSS`).                                                     |
 | `spot_trade_quote_ccy`             | `None`                     | SPOT `tradeQuoteCcy` override. Set `"USD"` to keep USD after migrating to `Crypto-USDC`. |
 | `http_timeout_secs`                | `60`                       | Timeout per REST attempt; see [HTTP retries](#http-retries).                             |
-| `max_retries`                      | `3`                        | Recoverable REST retries; order submissions and algo amendments send once.               |
+| `max_retries`                      | `3`                        | Recoverable REST retries; see [HTTP retries](#http-retries).                             |
 | `retry_delay_initial_ms`           | `1,000`                    | Initial delay before retrying.                                                           |
 | `retry_delay_max_ms`               | `10,000`                   | Maximum exponential backoff delay.                                                       |
 | `auth_timeout_secs`                | `None`                     | Override WebSocket authentication timeout.                                               |
@@ -1793,7 +1822,7 @@ See [USD to USDC spot migration](#usd-to-usdc-spot-migration) for `spot_trade_qu
 
 `http_timeout_secs` bounds each attempt. The total retry budget, including requests and backoff, is
 `max(180, http_timeout_secs)` seconds. The budget can end before `max_retries` is reached. Order
-submissions and algo amendments still send once.
+submissions, algo amendments and cancels, and spread cancels send once.
 
 `retry_delay_initial_ms` must be positive, and `retry_delay_max_ms` must be at least the initial delay
 and fit the supported backoff duration. These constraints also apply when `max_retries=0`.

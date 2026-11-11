@@ -615,6 +615,72 @@ async fn test_data_engine_connect_omits_provider_errors(
 }
 
 #[rstest]
+#[tokio::test]
+async fn test_data_engine_connect_reports_all_failed_clients_without_provider_errors(
+    clock: Rc<RefCell<VirtualClock>>,
+    cache: Rc<RefCell<Cache>>,
+) {
+    capture_connection_logs();
+    let mut engine = DataEngine::new(clock, cache, None);
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let barrier = Rc::new(tokio::sync::Barrier::new(3));
+
+    for (client_id, error_message) in [
+        ("SECOND", Some("password=SYN-password")),
+        ("HEALTHY", None),
+        ("FIRST", Some("https://SYN-user:SYN-token@example.invalid")),
+    ] {
+        let client_id = ClientId::from(client_id);
+        engine.register_client(
+            DataClientAdapter::new(
+                client_id,
+                None,
+                true,
+                true,
+                Box::new(ConnectionDataClient {
+                    client_id,
+                    error_message,
+                    error_operation: Some("connect"),
+                    barrier: Rc::clone(&barrier),
+                    connected: false,
+                    calls: Rc::clone(&calls),
+                }),
+            ),
+            None,
+        );
+    }
+
+    take_connection_logs();
+    let e = tokio::time::timeout(std::time::Duration::from_secs(1), engine.connect())
+        .await
+        .expect("clients must connect concurrently")
+        .unwrap_err();
+    let mut calls = calls.borrow().clone();
+    calls.sort_by_key(|(client_id, _)| *client_id);
+
+    assert_eq!(
+        e.to_string(),
+        "Failed to connect data clients: SECOND, FIRST"
+    );
+    assert_eq!(e.chain().count(), 1);
+    assert_eq!(
+        calls,
+        vec![
+            (ClientId::from("FIRST"), "connect"),
+            (ClientId::from("HEALTHY"), "connect"),
+            (ClientId::from("SECOND"), "connect"),
+        ]
+    );
+    assert_eq!(take_connection_logs(), vec![]);
+    assert!(
+        engine
+            .get_client(Some(&ClientId::from("HEALTHY")), None)
+            .unwrap()
+            .is_connected()
+    );
+}
+
+#[rstest]
 #[case::instruments(false)]
 #[case::bars(true)]
 fn test_partial_subscription_logs_only_failed_members(

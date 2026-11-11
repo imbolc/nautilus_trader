@@ -121,9 +121,9 @@ use crate::{
         consts::{
             OKX_FIELD_SCODE, OKX_FIELD_SMSG, OKX_HTTP_URL, OKX_NAUTILUS_BROKER_ID,
             OKX_POST_ONLY_CANCEL_REASON, OKX_POST_ONLY_CANCEL_SOURCE, OKX_SUPPORTED_ORDER_TYPES,
-            OKX_SUPPORTED_TIME_IN_FORCE, okx_algo_target_currency, okx_market_target_currency,
-            okx_reduce_only_wire_value, spot_trade_quote_ccy_wire_value,
-            validate_algo_trigger_type,
+            okx_algo_target_currency, okx_market_target_currency, okx_reduce_only_wire_value,
+            spot_trade_quote_ccy_wire_value, validate_algo_trigger_type,
+            validate_order_time_in_force, validate_regular_order_params,
         },
         credential::Credential,
         enums::{
@@ -1434,6 +1434,7 @@ impl OKXRawHttpClient {
         // outcome is left for stream updates and reconciliation to resolve.
         // Algo amendments also run once: a retry can reject after an earlier
         // attempt applied and the order triggered, leaving the original outcome ambiguous.
+        // Cancel retries can reject after the first attempt applied, obscuring its outcome.
         let is_order_mutation = method == Method::POST
             && matches!(
                 path,
@@ -1441,7 +1442,11 @@ impl OKXRawHttpClient {
                     | "/api/v5/trade/batch-orders"
                     | "/api/v5/trade/order-algo"
                     | "/api/v5/trade/amend-algos"
+                    | "/api/v5/trade/cancel-algos"
+                    | "/api/v5/trade/cancel-advance-algos"
                     | "/api/v5/sprd/order"
+                    | "/api/v5/sprd/cancel-order"
+                    | "/api/v5/sprd/mass-cancel"
             );
         let should_retry = |error: &OKXHttpError| !is_order_mutation && error.is_retryable();
 
@@ -1625,6 +1630,11 @@ impl OKXRawHttpClient {
         &self,
         request: OKXPlaceSpreadOrderRequest,
     ) -> Result<Vec<OKXPlaceOrderResponse>, OKXHttpError> {
+        let request = OKXPlaceSpreadOrderRequest {
+            tag: Some(OKX_NAUTILUS_BROKER_ID.to_string()),
+            ..request
+        };
+
         let body = serde_json::to_vec(&request)?;
 
         self.send_request(
@@ -2974,11 +2984,13 @@ impl OKXHttpClient {
     /// Requests all instruments for the `instrument_type` from OKX.
     ///
     /// Option requests require `instrument_family` (OKX `instFamily`), for example `BTC-USD`.
+    /// A definition that fails to parse is logged and left out.
     ///
     /// # Errors
     ///
-    /// Returns an error if `instrument_type` is option and `instrument_family` is missing,
-    /// the HTTP request fails, or instrument parsing fails.
+    /// Returns an error if:
+    /// - The `instrument_type` is option and `instrument_family` is missing.
+    /// - The HTTP request fails.
     ///
     /// # Returns
     ///
@@ -2990,6 +3002,22 @@ impl OKXHttpClient {
         instrument_type: OKXInstrumentType,
         instrument_family: Option<String>,
     ) -> anyhow::Result<(Vec<InstrumentAny>, Vec<(Ustr, u64)>)> {
+        let (instruments, inst_id_codes, parse_failures) = self
+            .request_instruments_with_parse_failures(instrument_type, instrument_family)
+            .await?;
+
+        for failure in parse_failures {
+            log::warn!("{failure}");
+        }
+
+        Ok((instruments, inst_id_codes))
+    }
+
+    pub(crate) async fn request_instruments_with_parse_failures(
+        &self,
+        instrument_type: OKXInstrumentType,
+        instrument_family: Option<String>,
+    ) -> anyhow::Result<(Vec<InstrumentAny>, Vec<(Ustr, u64)>, Vec<String>)> {
         if instrument_type == OKXInstrumentType::Option && instrument_family.is_none() {
             anyhow::bail!(
                 "option instruments require instrument_family (OKX instFamily), for example BTC-USD"
@@ -3045,6 +3073,7 @@ impl OKXHttpClient {
         let mut instruments: Vec<InstrumentAny> = Vec::new();
         let mut inst_id_codes: Vec<(Ustr, u64)> = Vec::new();
         let mut trade_quote_ccy_lists: Vec<(Ustr, Vec<Ustr>)> = Vec::new();
+        let mut parse_failures: Vec<String> = Vec::new();
 
         for inst in &resp {
             // Collect inst_id_code mappings for WebSocket order operations
@@ -3070,7 +3099,8 @@ impl OKXHttpClient {
                     // Unsupported instrument type, skip silently
                 }
                 Err(e) => {
-                    log::warn!("Failed to parse instrument {}: {e}", inst.inst_id);
+                    parse_failures
+                        .push(format!("Failed to parse instrument {}: {e}", inst.inst_id));
                 }
             }
         }
@@ -3079,18 +3109,35 @@ impl OKXHttpClient {
         self.inst_id_codes
             .rcu(|codes| codes.extend(inst_id_codes.iter().copied()));
 
-        Ok((instruments, inst_id_codes))
+        Ok((instruments, inst_id_codes, parse_failures))
     }
 
     /// Requests spread instruments from OKX.
     ///
+    /// A definition that fails to parse is logged and left out.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the HTTP request fails or spread parsing fails.
+    /// Returns an error if the HTTP request fails.
     pub async fn request_spread_instruments(
         &self,
         params: GetSpreadsParams,
     ) -> anyhow::Result<Vec<InstrumentAny>> {
+        let (instruments, parse_failures) = self
+            .request_spread_instruments_with_parse_failures(params)
+            .await?;
+
+        for failure in parse_failures {
+            log::warn!("{failure}");
+        }
+
+        Ok(instruments)
+    }
+
+    pub(crate) async fn request_spread_instruments_with_parse_failures(
+        &self,
+        params: GetSpreadsParams,
+    ) -> anyhow::Result<(Vec<InstrumentAny>, Vec<String>)> {
         let resp = self
             .inner
             .get_spreads(params)
@@ -3099,15 +3146,18 @@ impl OKXHttpClient {
 
         let ts_init = self.generate_ts_init();
         let mut instruments = Vec::new();
+        let mut parse_failures = Vec::new();
 
         for spread in &resp {
             match parse_spread_instrument(spread, None, None, ts_init) {
                 Ok(instrument) => instruments.push(instrument),
-                Err(e) => log::warn!("Failed to parse spread {}: {e}", spread.sprd_id),
+                Err(e) => {
+                    parse_failures.push(format!("Failed to parse spread {}: {e}", spread.sprd_id));
+                }
             }
         }
 
-        Ok(instruments)
+        Ok((instruments, parse_failures))
     }
 
     /// Requests a single instrument by `instrument_id` from OKX.
@@ -6242,6 +6292,11 @@ impl OKXHttpClient {
         &self,
         request: OKXPlaceOrderRequest,
     ) -> Result<OKXPlaceOrderResponse, OKXHttpError> {
+        let request = OKXPlaceOrderRequest {
+            tag: Some(OKX_NAUTILUS_BROKER_ID.to_string()),
+            ..request
+        };
+
         let body = serde_json::to_vec(&request)?;
 
         let resp: Vec<OKXPlaceOrderResponse> = self
@@ -6264,6 +6319,14 @@ impl OKXHttpClient {
         if requests.is_empty() {
             return Ok(Vec::new());
         }
+
+        let requests: Vec<_> = requests
+            .into_iter()
+            .map(|request| OKXPlaceOrderRequest {
+                tag: Some(OKX_NAUTILUS_BROKER_ID.to_string()),
+                ..request
+            })
+            .collect();
 
         let body = serde_json::to_vec(&requests)?;
         self.inner
@@ -6548,6 +6611,11 @@ impl OKXHttpClient {
         &self,
         request: OKXPlaceAlgoOrderRequest,
     ) -> Result<OKXPlaceAlgoOrderResponse, OKXHttpError> {
+        let request = OKXPlaceAlgoOrderRequest {
+            tag: Some(OKX_NAUTILUS_BROKER_ID.to_string()),
+            ..request
+        };
+
         let body = serde_json::to_vec(&request)?;
 
         let resp: Vec<OKXPlaceAlgoOrderResponse> = self
@@ -6872,13 +6940,7 @@ impl OKXHttpClient {
             ));
         }
 
-        if let Some(tif) = time_in_force
-            && !OKX_SUPPORTED_TIME_IN_FORCE.contains(&tif)
-        {
-            return Err(OKXHttpError::ValidationError(format!(
-                "Unsupported time in force: {tif:?}",
-            )));
-        }
+        validate_order_time_in_force(time_in_force).map_err(OKXHttpError::ValidationError)?;
 
         if !matches!(order_side, OrderSide::Buy | OrderSide::Sell) {
             return Err(OKXHttpError::ValidationError(
@@ -6918,11 +6980,15 @@ impl OKXHttpClient {
             okx_market_target_currency(instrument_type, order_side, order_type, quote_quantity)
                 .map_err(|e| OKXHttpError::ValidationError(e.to_string()))?;
 
-        if rpi && order_type != OrderType::Limit {
-            return Err(OKXHttpError::ValidationError(
-                "OKX RPI orders require a limit order".to_string(),
-            ));
-        }
+        validate_regular_order_params(
+            instrument_type,
+            order_type,
+            time_in_force,
+            post_only.unwrap_or(false),
+            rpi,
+            outcome.as_deref(),
+        )
+        .map_err(OKXHttpError::ValidationError)?;
 
         let (ord_type, px) = if rpi {
             (OKXOrderType::Rpi, price)
@@ -6930,11 +6996,6 @@ impl OKXHttpClient {
             (OKXOrderType::PostOnly, price)
         } else if let Some(tif) = time_in_force {
             match (order_type, tif) {
-                (OrderType::Market, TimeInForce::Fok) => {
-                    return Err(OKXHttpError::ValidationError(
-                        "Market orders with FOK time-in-force are not supported by OKX. Use Limit order with FOK instead.".to_string(),
-                    ));
-                }
                 (OrderType::Market, TimeInForce::Ioc) => {
                     // optimal_limit_ioc only works for SWAP/FUTURES
                     if matches!(
@@ -6946,26 +7007,13 @@ impl OKXHttpClient {
                         (OKXOrderType::OptimalLimitIoc, price)
                     }
                 }
-                (OrderType::Limit, TimeInForce::Fok) => {
-                    // OKX uses op_fok for options FOK orders
-                    if instrument_type == OKXInstrumentType::Option {
-                        (OKXOrderType::OpFok, price)
-                    } else {
-                        (OKXOrderType::Fok, price)
-                    }
-                }
+                (OrderType::Limit, TimeInForce::Fok) => (OKXOrderType::Fok, price),
                 (OrderType::Limit, TimeInForce::Ioc) => (OKXOrderType::Ioc, price),
                 _ => (OKXOrderType::from(order_type), price),
             }
         } else {
             (OKXOrderType::from(order_type), price)
         };
-
-        if instrument_type == OKXInstrumentType::Events && outcome.is_none() {
-            return Err(OKXHttpError::ValidationError(
-                "OKX event contract orders require `outcome`".to_string(),
-            ));
-        }
 
         let reduce_only = if reduce_only == Some(true) || position_side.is_some() {
             okx_reduce_only_wire_value(

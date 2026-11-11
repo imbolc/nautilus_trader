@@ -47,6 +47,7 @@
 //!
 //! Both `run()` (integrated event loop) and `start()` (manual lifecycle)
 //! follow this sequence.
+//! Startup aborts if a data or execution client returns a connection error.
 //!
 //! # Reconciliation
 //!
@@ -2735,7 +2736,7 @@ impl LiveNode {
                     order_ids.push(client_order_id);
                 }
             }
-            ExecutionEvent::Account(_) => {}
+            ExecutionEvent::Account(_) | ExecutionEvent::Data(_) => {}
         }
 
         Some(order_ids)
@@ -3498,7 +3499,9 @@ impl PendingEvents {
             // Account events are safe to process immediately. Reports and orders need
             // ExecEngine access, which may conflict with the driven startup future's borrow.
             match event {
-                ExecutionEvent::Account(_) => AsyncRunner::handle_exec_event(event),
+                ExecutionEvent::Account(_) | ExecutionEvent::Data(_) => {
+                    AsyncRunner::handle_exec_event(event);
+                }
                 ExecutionEvent::Report(report) => self.exec_reports.push(if rooted {
                     DispatchMessage::new(report, owner)
                 } else {

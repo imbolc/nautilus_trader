@@ -452,6 +452,11 @@ pub trait ExecutionAlgorithm: DataActor {
     /// the primary remains locally mutable. Converted quote-quantity spawns are
     /// restored proportionally in primary units. Late fills re-deduct restored
     /// quantity until primary submission is handed off.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the spawned order parameters are invalid. Failed
+    /// construction leaves primary quantity and pending spawn reductions unchanged.
     fn spawn_market(
         &mut self,
         primary: &mut OrderAny,
@@ -460,27 +465,16 @@ pub trait ExecutionAlgorithm: DataActor {
         reduce_only: bool,
         tags: Option<Vec<Ustr>>,
         reduce_primary: bool,
-    ) -> MarketOrder
+    ) -> Result<MarketOrder, OrderError>
     where
         Self: ExecutionAlgorithmNative,
     {
-        // Generate spawn ID first so we can track the reduction
         let core = ExecutionAlgorithmNative::exec_algorithm_core_mut(self);
         let client_order_id = core.spawn_client_order_id(&primary.client_order_id());
         let ts_init = core.clock_mut().timestamp_ns();
         let exec_algorithm_id = core.exec_algorithm_id;
 
-        if reduce_primary {
-            self.reduce_primary_order(primary, quantity);
-            ExecutionAlgorithmNative::exec_algorithm_core_mut(self).track_pending_spawn_reduction(
-                client_order_id,
-                primary.client_order_id(),
-                quantity,
-                primary.is_quote_quantity(),
-            );
-        }
-
-        MarketOrder::new(
+        let spawned = MarketOrder::new_checked(
             primary.trader_id(),
             primary.strategy_id(),
             primary.instrument_id(),
@@ -500,7 +494,19 @@ pub trait ExecutionAlgorithm: DataActor {
             primary.exec_algorithm_params().cloned(),
             Some(primary.client_order_id()),
             tags.or_else(|| primary.tags().map(<[Ustr]>::to_vec)),
-        )
+        )?;
+
+        if reduce_primary {
+            self.reduce_primary_order(primary, quantity);
+            ExecutionAlgorithmNative::exec_algorithm_core_mut(self).track_pending_spawn_reduction(
+                client_order_id,
+                primary.client_order_id(),
+                quantity,
+                primary.is_quote_quantity(),
+            );
+        }
+
+        Ok(spawned)
     }
 
     /// Spawns a limit order from a primary order.
@@ -520,6 +526,11 @@ pub trait ExecutionAlgorithm: DataActor {
     /// the primary remains locally mutable. Converted quote-quantity spawns are
     /// restored proportionally in primary units. Late fills re-deduct restored
     /// quantity until primary submission is handed off.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the spawned order parameters are invalid. Failed
+    /// construction leaves primary quantity and pending spawn reductions unchanged.
     #[expect(clippy::too_many_arguments)]
     fn spawn_limit(
         &mut self,
@@ -534,27 +545,16 @@ pub trait ExecutionAlgorithm: DataActor {
         emulation_trigger: Option<TriggerType>,
         tags: Option<Vec<Ustr>>,
         reduce_primary: bool,
-    ) -> LimitOrder
+    ) -> Result<LimitOrder, OrderError>
     where
         Self: ExecutionAlgorithmNative,
     {
-        // Generate spawn ID first so we can track the reduction
         let core = ExecutionAlgorithmNative::exec_algorithm_core_mut(self);
         let client_order_id = core.spawn_client_order_id(&primary.client_order_id());
         let ts_init = core.clock_mut().timestamp_ns();
         let exec_algorithm_id = core.exec_algorithm_id;
 
-        if reduce_primary {
-            self.reduce_primary_order(primary, quantity);
-            ExecutionAlgorithmNative::exec_algorithm_core_mut(self).track_pending_spawn_reduction(
-                client_order_id,
-                primary.client_order_id(),
-                quantity,
-                primary.is_quote_quantity(),
-            );
-        }
-
-        LimitOrder::new(
+        let spawned = LimitOrder::new_checked(
             primary.trader_id(),
             primary.strategy_id(),
             primary.instrument_id(),
@@ -580,7 +580,19 @@ pub trait ExecutionAlgorithm: DataActor {
             tags.or_else(|| primary.tags().map(<[Ustr]>::to_vec)),
             UUID4::new(),
             ts_init,
-        )
+        )?;
+
+        if reduce_primary {
+            self.reduce_primary_order(primary, quantity);
+            ExecutionAlgorithmNative::exec_algorithm_core_mut(self).track_pending_spawn_reduction(
+                client_order_id,
+                primary.client_order_id(),
+                quantity,
+                primary.is_quote_quantity(),
+            );
+        }
+
+        Ok(spawned)
     }
 
     /// Spawns a market-to-limit order from a primary order.
@@ -601,6 +613,11 @@ pub trait ExecutionAlgorithm: DataActor {
     /// `_emulation_trigger` is accepted for signature parity and is not applied:
     /// a `MARKET_TO_LIMIT` order is always initialized with no emulation trigger
     /// and cannot be emulated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the spawned order parameters are invalid. Failed
+    /// construction leaves primary quantity and pending spawn reductions unchanged.
     #[expect(clippy::too_many_arguments)]
     fn spawn_market_to_limit(
         &mut self,
@@ -613,27 +630,16 @@ pub trait ExecutionAlgorithm: DataActor {
         _emulation_trigger: Option<TriggerType>,
         tags: Option<Vec<Ustr>>,
         reduce_primary: bool,
-    ) -> MarketToLimitOrder
+    ) -> Result<MarketToLimitOrder, OrderError>
     where
         Self: ExecutionAlgorithmNative,
     {
-        // Generate spawn ID first so we can track the reduction
         let core = ExecutionAlgorithmNative::exec_algorithm_core_mut(self);
         let client_order_id = core.spawn_client_order_id(&primary.client_order_id());
         let ts_init = core.clock_mut().timestamp_ns();
         let exec_algorithm_id = core.exec_algorithm_id;
 
-        if reduce_primary {
-            self.reduce_primary_order(primary, quantity);
-            ExecutionAlgorithmNative::exec_algorithm_core_mut(self).track_pending_spawn_reduction(
-                client_order_id,
-                primary.client_order_id(),
-                quantity,
-                primary.is_quote_quantity(),
-            );
-        }
-
-        MarketToLimitOrder::new(
+        let spawned = MarketToLimitOrder::new_checked(
             primary.trader_id(),
             primary.strategy_id(),
             primary.instrument_id(),
@@ -656,7 +662,19 @@ pub trait ExecutionAlgorithm: DataActor {
             tags.or_else(|| primary.tags().map(<[Ustr]>::to_vec)),
             UUID4::new(),
             ts_init,
-        )
+        )?;
+
+        if reduce_primary {
+            self.reduce_primary_order(primary, quantity);
+            ExecutionAlgorithmNative::exec_algorithm_core_mut(self).track_pending_spawn_reduction(
+                client_order_id,
+                primary.client_order_id(),
+                quantity,
+                primary.is_quote_quantity(),
+            );
+        }
+
+        Ok(spawned)
     }
 
     /// Reduces the primary order's quantity by the spawn quantity.
@@ -1002,14 +1020,22 @@ pub trait ExecutionAlgorithm: DataActor {
 
     /// Submits an order to the execution engine via the risk engine.
     ///
+    /// The command's `order_init` carries the order's current values, so a quantity,
+    /// price or trigger price changed in place before submission reaches the venue.
+    ///
     /// Orders carrying a live emulation trigger are refused before submission.
-    /// For spawned orders with a pending primary reduction, refusal restores the
-    /// cached primary order quantity while it remains local and publishes
-    /// `OrderUpdated`.
+    /// For new or locally active spawned orders with a pending primary reduction,
+    /// emulation refusal restores unfilled quantity to a locally active primary
+    /// that has not been handed off, publishing `OrderUpdated` when its quantity changes.
     ///
     /// # Errors
     ///
-    /// Returns an error if the order carries a live emulation trigger or submission fails.
+    /// Returns an error if:
+    /// - The algorithm is not registered.
+    /// - A cached order with the same client order ID is not `INITIALIZED`, `EMULATED`,
+    ///   or `RELEASED`.
+    /// - The order carries a live emulation trigger.
+    /// - Order submission fails.
     fn submit_order(
         &mut self,
         order: OrderAny,
@@ -1021,6 +1047,20 @@ pub trait ExecutionAlgorithm: DataActor {
     {
         let trader_id =
             registered_trader_id(ExecutionAlgorithmNative::exec_algorithm_core_mut(self))?;
+
+        let order_exists = {
+            let cache = ExecutionAlgorithmNative::exec_algorithm_core_mut(self).cache_ref();
+            let cached_order = cache.order(&order.client_order_id());
+
+            if cached_order
+                .as_ref()
+                .is_some_and(|cached_order| !cached_order.is_active_local())
+            {
+                anyhow::bail!("Order denied: duplicate {}", order.client_order_id());
+            }
+
+            cached_order.is_some()
+        };
 
         if order.emulation_trigger().is_some() {
             let client_order_id = order.client_order_id();
@@ -1039,11 +1079,6 @@ pub trait ExecutionAlgorithm: DataActor {
             .unwrap_or_else(|| order.client_order_id());
         let params = core.submit_params(&primary_id);
 
-        let order_exists = {
-            let cache = core.cache_ref();
-            cache.order_exists(&order.client_order_id())
-        };
-
         {
             let cache_rc = core.cache_rc();
             let mut cache = cache_rc.borrow_mut();
@@ -1060,7 +1095,7 @@ pub trait ExecutionAlgorithm: DataActor {
             strategy_id,
             order.instrument_id(),
             order.client_order_id(),
-            order.init_event().clone(),
+            OrderInitialized::from(&order),
             order.exec_algorithm_id(),
             position_id,
             params,
@@ -2045,9 +2080,9 @@ mod tests {
         events::{
             OrderAccepted, OrderCanceled, OrderDenied, OrderDeniedReason, OrderRejected,
             order::spec::{
-                OrderAcceptedSpec, OrderCanceledSpec, OrderDeniedSpec, OrderExpiredSpec,
-                OrderFillVoidedSpec, OrderFilledSpec, OrderRejectedSpec, OrderSubmittedSpec,
-                OrderUpdatedSpec,
+                OrderAcceptedSpec, OrderCanceledSpec, OrderDeniedSpec, OrderEmulatedSpec,
+                OrderExpiredSpec, OrderFillVoidedSpec, OrderFilledSpec, OrderRejectedSpec,
+                OrderReleasedSpec, OrderSubmittedSpec, OrderUpdatedSpec,
             },
         },
         identifiers::{
@@ -2257,14 +2292,16 @@ mod tests {
             .borrow_mut()
             .add_order(primary.clone(), None, None, false)
             .unwrap();
-        let spawned = algo.spawn_market(
-            &mut primary,
-            Quantity::from("0.5"),
-            TimeInForce::Fok,
-            false,
-            None,
-            true,
-        );
+        let spawned = algo
+            .spawn_market(
+                &mut primary,
+                Quantity::from("0.5"),
+                TimeInForce::Fok,
+                false,
+                None,
+                true,
+            )
+            .unwrap();
         let spawned_order = OrderAny::Market(spawned);
         algo.core
             .cache_rc()
@@ -2327,14 +2364,10 @@ mod tests {
             .borrow_mut()
             .add_order(primary.clone(), None, None, false)
             .unwrap();
-        let mut spawned_order = OrderAny::Market(algo.spawn_market(
-            &mut primary,
-            spawn_qty,
-            TimeInForce::Fok,
-            false,
-            None,
-            true,
-        ));
+        let mut spawned_order = OrderAny::Market(
+            algo.spawn_market(&mut primary, spawn_qty, TimeInForce::Fok, false, None, true)
+                .unwrap(),
+        );
         algo.core
             .cache_rc()
             .borrow_mut()
@@ -2473,14 +2506,10 @@ mod tests {
         quantity: Quantity,
     ) -> OrderAny {
         let mut primary = algo.cache().order(&primary_id).unwrap();
-        let child = OrderAny::Market(algo.spawn_market(
-            &mut primary,
-            quantity,
-            TimeInForce::Fok,
-            false,
-            None,
-            true,
-        ));
+        let child = OrderAny::Market(
+            algo.spawn_market(&mut primary, quantity, TimeInForce::Fok, false, None, true)
+                .unwrap(),
+        );
         algo.core
             .cache_rc()
             .borrow_mut()
@@ -2827,14 +2856,16 @@ mod tests {
             None,  // tags
         ));
 
-        let spawned = algo.spawn_market(
-            &mut primary,
-            Quantity::from("0.5"),
-            TimeInForce::Ioc,
-            false,
-            None,  // tags
-            false, // reduce_primary
-        );
+        let spawned = algo
+            .spawn_market(
+                &mut primary,
+                Quantity::from("0.5"),
+                TimeInForce::Ioc,
+                false,
+                None,  // tags
+                false, // reduce_primary
+            )
+            .unwrap();
 
         assert_eq!(spawned.client_order_id.as_str(), "O-001-E1");
         assert_eq!(spawned.instrument_id, instrument_id);
@@ -2843,6 +2874,261 @@ mod tests {
         assert_eq!(spawned.time_in_force, TimeInForce::Ioc);
         assert_eq!(spawned.exec_algorithm_id, Some(algo.id()));
         assert_eq!(spawned.exec_spawn_id, Some(ClientOrderId::from("O-001")));
+    }
+
+    #[rstest]
+    #[case::market_gtd(
+        OrderType::Market,
+        "0.2",
+        TimeInForce::Gtd,
+        None,
+        None,
+        "GTD not supported for Market orders"
+    )]
+    #[case::market_zero(
+        OrderType::Market,
+        "0.0",
+        TimeInForce::Gtc,
+        None,
+        None,
+        "invalid `Quantity` for 'quantity' not positive, was 0.0"
+    )]
+    #[case::limit_zero(
+        OrderType::Limit,
+        "0.0",
+        TimeInForce::Gtc,
+        None,
+        None,
+        "invalid `Quantity` for 'quantity' not positive, was 0.0"
+    )]
+    #[case::limit_gtd_missing(
+        OrderType::Limit,
+        "0.2",
+        TimeInForce::Gtd,
+        None,
+        None,
+        "`expire_time` is required for `GTD` order"
+    )]
+    #[case::limit_gtd_zero(
+        OrderType::Limit,
+        "0.2",
+        TimeInForce::Gtd,
+        Some(UnixNanos::default()),
+        None,
+        "`expire_time` is required for `GTD` order"
+    )]
+    #[case::limit_display(
+        OrderType::Limit,
+        "0.2",
+        TimeInForce::Gtc,
+        None,
+        Some(Quantity::from("0.3")),
+        "`display_qty` may not exceed `quantity`"
+    )]
+    #[case::mtl_zero(
+        OrderType::MarketToLimit,
+        "0.0",
+        TimeInForce::Gtc,
+        None,
+        None,
+        "invalid `Quantity` for 'quantity' not positive, was 0.0"
+    )]
+    #[case::mtl_gtd_missing(
+        OrderType::MarketToLimit,
+        "0.2",
+        TimeInForce::Gtd,
+        None,
+        None,
+        "`expire_time` is required for `GTD` order"
+    )]
+    #[case::mtl_gtd_zero(
+        OrderType::MarketToLimit,
+        "0.2",
+        TimeInForce::Gtd,
+        Some(UnixNanos::default()),
+        None,
+        "`expire_time` is required for `GTD` order"
+    )]
+    #[case::mtl_display(
+        OrderType::MarketToLimit,
+        "0.2",
+        TimeInForce::Gtc,
+        None,
+        Some(Quantity::from("0.3")),
+        "`display_qty` may not exceed `quantity`"
+    )]
+    fn test_spawn_constructor_failure_preserves_primary(
+        #[case] order_type: OrderType,
+        #[case] quantity: Quantity,
+        #[case] time_in_force: TimeInForce,
+        #[case] expire_time: Option<UnixNanos>,
+        #[case] display_qty: Option<Quantity>,
+        #[case] expected_error: &str,
+        #[values(true, false)] reduce_primary: bool,
+    ) {
+        let (mut algo, primary_id, existing_spawn) = setup_pending_spawn();
+        let mut primary = algo.cache().order(&primary_id).unwrap();
+        let snapshot = serde_json::to_value(&primary).unwrap();
+        let strategy_id = primary.strategy_id();
+        let (handler, events) = subscribe_order_topic(strategy_id);
+
+        let result = match order_type {
+            OrderType::Market => algo
+                .spawn_market(
+                    &mut primary,
+                    quantity,
+                    time_in_force,
+                    false,
+                    None,
+                    reduce_primary,
+                )
+                .map(OrderAny::from),
+            OrderType::Limit => algo
+                .spawn_limit(
+                    &mut primary,
+                    quantity,
+                    Price::from("50001.0"),
+                    time_in_force,
+                    expire_time,
+                    false,
+                    false,
+                    display_qty,
+                    None,
+                    None,
+                    reduce_primary,
+                )
+                .map(OrderAny::from),
+            OrderType::MarketToLimit => algo
+                .spawn_market_to_limit(
+                    &mut primary,
+                    quantity,
+                    time_in_force,
+                    expire_time,
+                    false,
+                    display_qty,
+                    None,
+                    None,
+                    reduce_primary,
+                )
+                .map(OrderAny::from),
+            _ => unreachable!("Only the three spawn order types are tested"),
+        };
+
+        msgbus::unsubscribe_order_events(format!("events.order.{strategy_id}").into(), &handler);
+        let cached = algo.cache().order(&primary_id).unwrap();
+        let existing_reduction = algo
+            .core
+            .spawn_reduction(existing_spawn.client_order_id())
+            .unwrap();
+
+        assert_eq!(result.unwrap_err().to_string(), expected_error);
+        assert_eq!(serde_json::to_value(&primary).unwrap(), snapshot);
+        assert_eq!(serde_json::to_value(&cached).unwrap(), snapshot);
+        assert!(events.borrow().is_empty());
+        assert!(
+            algo.core
+                .spawn_reduction(ClientOrderId::from("O-001-E2"))
+                .is_none()
+        );
+        assert_eq!(existing_reduction.primary_id, primary_id);
+        assert_eq!(existing_reduction.deducted_qty, Quantity::from("0.5"));
+        assert!(!existing_reduction.spawn_was_quote_quantity);
+        assert_eq!(existing_reduction.restored_qty, None);
+        assert_eq!(algo.core.spawn_fill_debt(primary_id), None);
+        assert_eq!(algo.core.spawn_sequence(&primary_id), Some(2));
+    }
+
+    #[rstest]
+    fn test_spawn_success_updates_primary_after_validation(
+        #[values(OrderType::Market, OrderType::Limit, OrderType::MarketToLimit)]
+        order_type: OrderType,
+        #[values(true, false)] reduce_primary: bool,
+    ) {
+        let (mut algo, primary_id, _) = setup_pending_spawn();
+        let mut primary = algo.cache().order(&primary_id).unwrap();
+        let strategy_id = primary.strategy_id();
+        let quantity = Quantity::from("0.2");
+        let (handler, events) = subscribe_order_topic(strategy_id);
+
+        let spawned = match order_type {
+            OrderType::Market => algo
+                .spawn_market(
+                    &mut primary,
+                    quantity,
+                    TimeInForce::Ioc,
+                    false,
+                    None,
+                    reduce_primary,
+                )
+                .map(OrderAny::from),
+            OrderType::Limit => algo
+                .spawn_limit(
+                    &mut primary,
+                    quantity,
+                    Price::from("50001.0"),
+                    TimeInForce::Gtd,
+                    Some(UnixNanos::from(1_000_000_000)),
+                    false,
+                    false,
+                    Some(quantity),
+                    None,
+                    None,
+                    reduce_primary,
+                )
+                .map(OrderAny::from),
+            OrderType::MarketToLimit => algo
+                .spawn_market_to_limit(
+                    &mut primary,
+                    quantity,
+                    TimeInForce::Gtd,
+                    Some(UnixNanos::from(1_000_000_000)),
+                    false,
+                    Some(quantity),
+                    None,
+                    None,
+                    reduce_primary,
+                )
+                .map(OrderAny::from),
+            _ => unreachable!("Only the three spawn order types are tested"),
+        }
+        .unwrap();
+
+        msgbus::unsubscribe_order_events(format!("events.order.{strategy_id}").into(), &handler);
+
+        let expected_qty = if reduce_primary {
+            Quantity::from("0.3")
+        } else {
+            Quantity::from("0.5")
+        };
+
+        let cached = algo.cache().order(&primary_id).unwrap();
+        let reduction = algo.core.spawn_reduction(spawned.client_order_id());
+        let events = events.borrow();
+
+        assert_eq!(spawned.order_type(), order_type);
+        assert_eq!(spawned.client_order_id(), ClientOrderId::from("O-001-E2"));
+        assert_eq!(spawned.quantity(), quantity);
+        assert_eq!(spawned.exec_algorithm_id(), Some(algo.id()));
+        assert_eq!(spawned.exec_spawn_id(), Some(primary_id));
+        assert_eq!(primary.quantity(), expected_qty);
+        assert_eq!(cached.quantity(), expected_qty);
+        assert_eq!(events.len(), usize::from(reduce_primary));
+
+        if reduce_primary {
+            let OrderEventAny::Updated(event) = &events[0] else {
+                panic!("Expected OrderUpdated");
+            };
+
+            assert_eq!(event.client_order_id, primary_id);
+            assert_eq!(event.quantity, expected_qty);
+            let reduction = reduction.unwrap();
+            assert_eq!(reduction.primary_id, primary_id);
+            assert_eq!(reduction.deducted_qty, quantity);
+            assert!(!reduction.spawn_was_quote_quantity);
+            assert_eq!(reduction.restored_qty, None);
+        } else {
+            assert!(reduction.is_none());
+        }
     }
 
     #[rstest]
@@ -2872,30 +3158,36 @@ mod tests {
             None,
         ));
 
-        let spawned1 = algo.spawn_market(
-            &mut primary,
-            Quantity::from("0.25"),
-            TimeInForce::Ioc,
-            false,
-            None,
-            false,
-        );
-        let spawned2 = algo.spawn_market(
-            &mut primary,
-            Quantity::from("0.25"),
-            TimeInForce::Ioc,
-            false,
-            None,
-            false,
-        );
-        let spawned3 = algo.spawn_market(
-            &mut primary,
-            Quantity::from("0.25"),
-            TimeInForce::Ioc,
-            false,
-            None,
-            false,
-        );
+        let spawned1 = algo
+            .spawn_market(
+                &mut primary,
+                Quantity::from("0.25"),
+                TimeInForce::Ioc,
+                false,
+                None,
+                false,
+            )
+            .unwrap();
+        let spawned2 = algo
+            .spawn_market(
+                &mut primary,
+                Quantity::from("0.25"),
+                TimeInForce::Ioc,
+                false,
+                None,
+                false,
+            )
+            .unwrap();
+        let spawned3 = algo
+            .spawn_market(
+                &mut primary,
+                Quantity::from("0.25"),
+                TimeInForce::Ioc,
+                false,
+                None,
+                false,
+            )
+            .unwrap();
 
         assert_eq!(spawned1.client_order_id.as_str(), "O-001-E1");
         assert_eq!(spawned2.client_order_id.as_str(), "O-001-E2");
@@ -2987,19 +3279,21 @@ mod tests {
         ));
 
         let price = Price::from("50000.0");
-        let spawned = algo.spawn_limit(
-            &mut primary,
-            Quantity::from("0.5"),
-            price,
-            TimeInForce::Gtc,
-            None,  // expire_time
-            false, // post_only
-            false, // reduce_only
-            None,  // display_qty
-            None,  // emulation_trigger
-            None,  // tags
-            false, // reduce_primary
-        );
+        let spawned = algo
+            .spawn_limit(
+                &mut primary,
+                Quantity::from("0.5"),
+                price,
+                TimeInForce::Gtc,
+                None,  // expire_time
+                false, // post_only
+                false, // reduce_only
+                None,  // display_qty
+                None,  // emulation_trigger
+                None,  // tags
+                false, // reduce_primary
+            )
+            .unwrap();
 
         assert_eq!(spawned.client_order_id.as_str(), "O-001-E1");
         assert_eq!(spawned.instrument_id, instrument_id);
@@ -3039,17 +3333,19 @@ mod tests {
             None,
         ));
 
-        let spawned = algo.spawn_market_to_limit(
-            &mut primary,
-            Quantity::from("0.5"),
-            TimeInForce::Gtc,
-            None,  // expire_time
-            false, // reduce_only
-            None,  // display_qty
-            None,  // emulation_trigger
-            None,  // tags
-            false, // reduce_primary
-        );
+        let spawned = algo
+            .spawn_market_to_limit(
+                &mut primary,
+                Quantity::from("0.5"),
+                TimeInForce::Gtc,
+                None,  // expire_time
+                false, // reduce_only
+                None,  // display_qty
+                None,  // emulation_trigger
+                None,  // tags
+                false, // reduce_primary
+            )
+            .unwrap();
 
         assert_eq!(spawned.client_order_id.as_str(), "O-001-E1");
         assert_eq!(spawned.instrument_id, instrument_id);
@@ -3088,14 +3384,16 @@ mod tests {
         ));
 
         let tags = vec![ustr::Ustr::from("TAG1"), ustr::Ustr::from("TAG2")];
-        let spawned = algo.spawn_market(
-            &mut primary,
-            Quantity::from("0.5"),
-            TimeInForce::Ioc,
-            false,
-            Some(tags.clone()),
-            false,
-        );
+        let spawned = algo
+            .spawn_market(
+                &mut primary,
+                Quantity::from("0.5"),
+                TimeInForce::Ioc,
+                false,
+                Some(tags.clone()),
+                false,
+            )
+            .unwrap();
 
         assert_eq!(spawned.tags, Some(tags));
     }
@@ -3134,14 +3432,16 @@ mod tests {
             Some(primary_tags.clone()),
         ));
 
-        let spawned_market = algo.spawn_market(
-            &mut primary,
-            Quantity::from("0.25"),
-            TimeInForce::Ioc,
-            false,
-            None, // falls back to primary.tags
-            false,
-        );
+        let spawned_market = algo
+            .spawn_market(
+                &mut primary,
+                Quantity::from("0.25"),
+                TimeInForce::Ioc,
+                false,
+                None, // falls back to primary.tags
+                false,
+            )
+            .unwrap();
         assert!(spawned_market.is_quote_quantity);
         assert_eq!(spawned_market.exec_algorithm_params, Some(params.clone()));
         assert_eq!(spawned_market.tags, Some(primary_tags.clone()));
@@ -3150,19 +3450,21 @@ mod tests {
             Some(linked_order_ids.clone())
         );
 
-        let spawned_limit = algo.spawn_limit(
-            &mut primary,
-            Quantity::from("0.25"),
-            Price::from("50000.0"),
-            TimeInForce::Gtc,
-            None,  // expire_time
-            false, // post_only
-            false, // reduce_only
-            None,  // display_qty
-            None,  // emulation_trigger
-            None,  // falls back to primary.tags
-            false,
-        );
+        let spawned_limit = algo
+            .spawn_limit(
+                &mut primary,
+                Quantity::from("0.25"),
+                Price::from("50000.0"),
+                TimeInForce::Gtc,
+                None,  // expire_time
+                false, // post_only
+                false, // reduce_only
+                None,  // display_qty
+                None,  // emulation_trigger
+                None,  // falls back to primary.tags
+                false,
+            )
+            .unwrap();
         assert!(spawned_limit.is_quote_quantity);
         assert_eq!(spawned_limit.exec_algorithm_params, Some(params.clone()));
         assert_eq!(spawned_limit.tags, Some(primary_tags.clone()));
@@ -3171,17 +3473,19 @@ mod tests {
             Some(linked_order_ids.clone())
         );
 
-        let spawned_mtl = algo.spawn_market_to_limit(
-            &mut primary,
-            Quantity::from("0.25"),
-            TimeInForce::Gtc,
-            None,  // expire_time
-            false, // reduce_only
-            None,  // display_qty
-            None,  // emulation_trigger
-            None,  // falls back to primary.tags
-            false,
-        );
+        let spawned_mtl = algo
+            .spawn_market_to_limit(
+                &mut primary,
+                Quantity::from("0.25"),
+                TimeInForce::Gtc,
+                None,  // expire_time
+                false, // reduce_only
+                None,  // display_qty
+                None,  // emulation_trigger
+                None,  // falls back to primary.tags
+                false,
+            )
+            .unwrap();
         assert!(spawned_mtl.is_quote_quantity);
         assert_eq!(spawned_mtl.exec_algorithm_params, Some(params));
         assert_eq!(spawned_mtl.tags, Some(primary_tags));
@@ -3299,6 +3603,143 @@ mod tests {
     }
 
     #[rstest]
+    #[case::submitted(OrderStatus::Submitted)]
+    #[case::accepted(OrderStatus::Accepted)]
+    #[case::canceled(OrderStatus::Canceled)]
+    fn test_algorithm_submit_order_rejects_retained_initialized_order_with_non_local_cached_order(
+        #[case] status: OrderStatus,
+    ) {
+        let mut algo = create_test_algorithm();
+        register_algorithm(&mut algo);
+        let order = OrderTestBuilder::new(OrderType::Market)
+            .client_order_id(ClientOrderId::from("O-ALGO-RETAINED-ACCEPTED"))
+            .instrument_id(InstrumentId::from("BTCUSDT.BINANCE"))
+            .strategy_id(StrategyId::from("TEST-001"))
+            .side(OrderSide::Buy)
+            .quantity(Quantity::from("1.25"))
+            .build();
+        let client_order_id = order.client_order_id();
+        let (risk_handler, risk_messages): (_, TypedIntoMessageSavingHandler<TradingCommand>) =
+            get_typed_into_message_saving_handler(Some(Ustr::from("RiskEngine.queue_execute")));
+        msgbus::register_trading_command_endpoint(
+            MessagingSwitchboard::risk_engine_queue_execute(),
+            risk_handler,
+        );
+        let (handler, events) = subscribe_order_topic(order.strategy_id());
+
+        algo.submit_order(order.clone(), None, None).unwrap();
+        let mut before = order.clone();
+        submit_order_in_cache(&mut algo, &mut before);
+        if status != OrderStatus::Submitted {
+            accept_spawned_order(&mut algo, &mut before);
+        }
+
+        if status == OrderStatus::Canceled {
+            cancel_spawned_order(&mut algo, &mut before);
+        }
+
+        let snapshot = serde_json::to_value(&before).unwrap();
+
+        let result = algo.submit_order(order.clone(), None, None);
+
+        msgbus::unsubscribe_order_events(
+            format!("events.order.{}", order.strategy_id()).into(),
+            &handler,
+        );
+        let cache = algo.cache();
+        let cached = cache.order(&client_order_id).unwrap();
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            format!("Order denied: duplicate {client_order_id}")
+        );
+        assert_eq!(risk_messages.get_messages().len(), 1);
+        assert_eq!(
+            *events.borrow(),
+            vec![OrderEventAny::Initialized(order.init_event().clone())]
+        );
+        assert_eq!(cached.status(), status);
+        assert_eq!(cached.events(), before.events());
+        assert_eq!(serde_json::to_value(&cached).unwrap(), snapshot);
+    }
+
+    #[rstest]
+    #[case::initialized(OrderStatus::Initialized)]
+    #[case::emulated(OrderStatus::Emulated)]
+    #[case::released(OrderStatus::Released)]
+    fn test_algorithm_submit_order_replaces_active_local_cached_order(#[case] status: OrderStatus) {
+        let mut algo = create_test_algorithm();
+        register_algorithm(&mut algo);
+        let client_order_id = ClientOrderId::from("O-LOCAL-REPLACE");
+        let mut local = OrderTestBuilder::new(OrderType::StopMarket)
+            .instrument_id(InstrumentId::from("BTCUSDT.BINANCE"))
+            .strategy_id(StrategyId::from("TEST-001"))
+            .client_order_id(client_order_id)
+            .side(OrderSide::Sell)
+            .quantity(Quantity::from("1.25"))
+            .trigger_price(Price::from("51000.0"))
+            .emulation_trigger(TriggerType::BidAsk)
+            .build();
+
+        if status == OrderStatus::Emulated {
+            let event = OrderEmulatedSpec::builder()
+                .trader_id(local.trader_id())
+                .strategy_id(local.strategy_id())
+                .instrument_id(local.instrument_id())
+                .client_order_id(client_order_id)
+                .build();
+            local.apply(OrderEventAny::Emulated(event)).unwrap();
+        } else if status == OrderStatus::Released {
+            let event = OrderReleasedSpec::builder()
+                .trader_id(local.trader_id())
+                .strategy_id(local.strategy_id())
+                .instrument_id(local.instrument_id())
+                .client_order_id(client_order_id)
+                .released_price(Price::from("51001.0"))
+                .build();
+            local.apply(OrderEventAny::Released(event)).unwrap();
+        }
+
+        let cache_rc = algo.core.cache_rc();
+        cache_rc
+            .borrow_mut()
+            .add_order(local.clone(), None, None, false)
+            .unwrap();
+        let order = OrderTestBuilder::new(OrderType::Market)
+            .instrument_id(local.instrument_id())
+            .strategy_id(local.strategy_id())
+            .client_order_id(client_order_id)
+            .side(OrderSide::Buy)
+            .quantity(Quantity::from("2.50"))
+            .build();
+        let (risk_handler, risk_messages): (_, TypedIntoMessageSavingHandler<TradingCommand>) =
+            get_typed_into_message_saving_handler(Some(Ustr::from("RiskEngine.queue_execute")));
+        msgbus::register_trading_command_endpoint(
+            MessagingSwitchboard::risk_engine_queue_execute(),
+            risk_handler,
+        );
+
+        algo.submit_order(order.clone(), None, None).unwrap();
+
+        let cache = cache_rc.borrow();
+        let cached = cache.order(&client_order_id).unwrap();
+        assert_eq!(local.status(), status);
+        assert_eq!(cached.status(), OrderStatus::Initialized);
+        assert_eq!(cached.events(), order.events());
+        assert_eq!(
+            serde_json::to_value(&*cached).unwrap(),
+            serde_json::to_value(&order).unwrap()
+        );
+        let messages = risk_messages.get_messages();
+        assert_eq!(messages.len(), 1);
+
+        let TradingCommand::SubmitOrder(command) = &messages[0] else {
+            panic!("Expected SubmitOrder");
+        };
+
+        assert_eq!(command.order_init, *order.init_event());
+    }
+
+    #[rstest]
     fn test_algorithm_submit_order_publishes_initialized_for_new_order() {
         let mut algo = create_test_algorithm();
         register_algorithm(&mut algo);
@@ -3380,6 +3821,70 @@ mod tests {
     }
 
     #[rstest]
+    fn test_algorithm_submit_order_rejects_accepted_emulated_spawn_before_restoring_primary() {
+        let (mut algo, primary_id, _) = setup_pending_spawn();
+        let mut primary = algo.cache().order(&primary_id).unwrap();
+        let spawned = algo
+            .spawn_limit(
+                &mut primary,
+                Quantity::from("0.2"),
+                Price::from("50000.0"),
+                TimeInForce::Gtc,
+                None,
+                false,
+                false,
+                None,
+                Some(TriggerType::BidAsk),
+                None,
+                true,
+            )
+            .unwrap();
+        let retained = OrderAny::Limit(spawned);
+        let mut accepted = retained.clone();
+        accepted.set_emulation_trigger(None);
+        let (risk_handler, risk_messages): (_, TypedIntoMessageSavingHandler<TradingCommand>) =
+            get_typed_into_message_saving_handler(Some(Ustr::from("RiskEngine.queue_execute")));
+        msgbus::register_trading_command_endpoint(
+            MessagingSwitchboard::risk_engine_queue_execute(),
+            risk_handler,
+        );
+
+        algo.submit_order(accepted.clone(), None, None).unwrap();
+        submit_order_in_cache(&mut algo, &mut accepted);
+        accept_spawned_order(&mut algo, &mut accepted);
+        let primary_before = algo.cache().order(&primary_id).unwrap();
+        let (handler, events) = subscribe_order_topic(retained.strategy_id());
+
+        let result = algo.submit_order(retained.clone(), None, None);
+
+        msgbus::unsubscribe_order_events(
+            format!("events.order.{}", retained.strategy_id()).into(),
+            &handler,
+        );
+        let cache = algo.cache();
+        let primary_after = cache.order(&primary_id).unwrap();
+        let cached = cache.order(&retained.client_order_id()).unwrap();
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            format!("Order denied: duplicate {}", retained.client_order_id())
+        );
+        assert_eq!(risk_messages.get_messages().len(), 1);
+        assert!(events.borrow().is_empty());
+        assert_eq!(primary_after.quantity(), Quantity::from("0.3"));
+        assert_eq!(primary_after.events(), primary_before.events());
+        assert_eq!(
+            serde_json::to_value(&primary_after).unwrap(),
+            serde_json::to_value(&primary_before).unwrap()
+        );
+        assert_eq!(cached.status(), OrderStatus::Accepted);
+        assert_eq!(cached.events(), accepted.events());
+        assert_eq!(
+            serde_json::to_value(&cached).unwrap(),
+            serde_json::to_value(&accepted).unwrap()
+        );
+    }
+
+    #[rstest]
     fn test_algorithm_submit_order_refuses_emulated_limit_spawn() {
         let mut algo = create_test_algorithm();
         register_algorithm(&mut algo);
@@ -3413,19 +3918,21 @@ mod tests {
             emulator_handler,
         );
 
-        let spawned = algo.spawn_limit(
-            &mut primary,
-            Quantity::from("0.4"),
-            Price::from("50000.0"),
-            TimeInForce::Gtc,
-            None,
-            false,
-            false,
-            None,
-            Some(TriggerType::BidAsk),
-            None,
-            true,
-        );
+        let spawned = algo
+            .spawn_limit(
+                &mut primary,
+                Quantity::from("0.4"),
+                Price::from("50000.0"),
+                TimeInForce::Gtc,
+                None,
+                false,
+                false,
+                None,
+                Some(TriggerType::BidAsk),
+                None,
+                true,
+            )
+            .unwrap();
         let spawned = OrderAny::Limit(spawned);
         let client_order_id = spawned.client_order_id();
         let result = algo.submit_order(spawned, None, None);
@@ -3484,19 +3991,21 @@ mod tests {
             risk_handler,
         );
 
-        let spawned = algo.spawn_limit(
-            &mut primary,
-            Quantity::from("0.4"),
-            Price::from("50000.0"),
-            TimeInForce::Gtc,
-            None,
-            false,
-            false,
-            None,
-            None,
-            None,
-            false,
-        );
+        let spawned = algo
+            .spawn_limit(
+                &mut primary,
+                Quantity::from("0.4"),
+                Price::from("50000.0"),
+                TimeInForce::Gtc,
+                None,
+                false,
+                false,
+                None,
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         let client_order_id = spawned.client_order_id;
         algo.submit_order(OrderAny::Limit(spawned), None, None)
             .unwrap();
@@ -3546,14 +4055,16 @@ mod tests {
             cache.add_order(primary.clone(), None, None, false).unwrap();
         }
 
-        let spawned = algo.spawn_market(
-            &mut primary,
-            Quantity::from("0.4"),
-            TimeInForce::Ioc,
-            false,
-            None,
-            true, // reduce_primary = true
-        );
+        let spawned = algo
+            .spawn_market(
+                &mut primary,
+                Quantity::from("0.4"),
+                TimeInForce::Ioc,
+                false,
+                None,
+                true, // reduce_primary = true
+            )
+            .unwrap();
 
         assert_eq!(spawned.quantity, Quantity::from("0.4"));
         assert_eq!(primary.quantity(), Quantity::from("0.6"));
@@ -3625,14 +4136,16 @@ mod tests {
             handler,
         );
 
-        let spawned = algo.spawn_market(
-            &mut primary,
-            Quantity::from("0.4"),
-            TimeInForce::Ioc,
-            false,
-            None,
-            false, // reduce_primary
-        );
+        let spawned = algo
+            .spawn_market(
+                &mut primary,
+                Quantity::from("0.4"),
+                TimeInForce::Ioc,
+                false,
+                None,
+                false, // reduce_primary
+            )
+            .unwrap();
         algo.submit_order(OrderAny::Market(spawned), None, None)
             .unwrap();
 
@@ -4264,14 +4777,16 @@ mod tests {
             cache.add_order(primary.clone(), None, None, false).unwrap();
         }
 
-        let spawned = algo.spawn_market(
-            &mut primary,
-            Quantity::from("0.5"),
-            TimeInForce::Fok,
-            false,
-            None,
-            true,
-        );
+        let spawned = algo
+            .spawn_market(
+                &mut primary,
+                Quantity::from("0.5"),
+                TimeInForce::Fok,
+                false,
+                None,
+                true,
+            )
+            .unwrap();
 
         assert_eq!(primary.quantity(), Quantity::from("0.5"));
 
@@ -4341,14 +4856,16 @@ mod tests {
             cache.add_order(primary.clone(), None, None, false).unwrap();
         }
 
-        let spawned = algo.spawn_market(
-            &mut primary,
-            Quantity::from("0.5"),
-            TimeInForce::Fok,
-            false,
-            None,
-            true,
-        );
+        let spawned = algo
+            .spawn_market(
+                &mut primary,
+                Quantity::from("0.5"),
+                TimeInForce::Fok,
+                false,
+                None,
+                true,
+            )
+            .unwrap();
 
         assert_eq!(primary.quantity(), Quantity::from("0.5"));
 
@@ -4421,14 +4938,16 @@ mod tests {
             cache.add_order(primary.clone(), None, None, false).unwrap();
         }
 
-        let spawned = algo.spawn_market(
-            &mut primary,
-            Quantity::from("0.5"),
-            TimeInForce::Fok,
-            false,
-            None,
-            false,
-        );
+        let spawned = algo
+            .spawn_market(
+                &mut primary,
+                Quantity::from("0.5"),
+                TimeInForce::Fok,
+                false,
+                None,
+                false,
+            )
+            .unwrap();
 
         assert_eq!(primary.quantity(), Quantity::from("1.0"));
 
@@ -4498,22 +5017,26 @@ mod tests {
             cache.add_order(primary.clone(), None, None, false).unwrap();
         }
 
-        let spawned1 = algo.spawn_market(
-            &mut primary,
-            Quantity::from("0.3"),
-            TimeInForce::Fok,
-            false,
-            None,
-            true,
-        );
-        let spawned2 = algo.spawn_market(
-            &mut primary,
-            Quantity::from("0.4"),
-            TimeInForce::Fok,
-            false,
-            None,
-            true,
-        );
+        let spawned1 = algo
+            .spawn_market(
+                &mut primary,
+                Quantity::from("0.3"),
+                TimeInForce::Fok,
+                false,
+                None,
+                true,
+            )
+            .unwrap();
+        let spawned2 = algo
+            .spawn_market(
+                &mut primary,
+                Quantity::from("0.4"),
+                TimeInForce::Fok,
+                false,
+                None,
+                true,
+            )
+            .unwrap();
         assert_eq!(primary.quantity(), Quantity::from("0.3"));
 
         let spawned_order1 = OrderAny::Market(spawned1);
@@ -4625,10 +5148,9 @@ mod tests {
             panic!("Expected exactly one SubmitOrder command");
         };
         assert_eq!(command.client_order_id, client_order_id);
-        // The command embeds the immutable OrderInitialized event, so its
-        // quantity is the pre-reduction 1.0; consumers resolve the cached
-        // order, which carries the reduced quantity asserted below.
-        assert_eq!(command.order_init.quantity, Quantity::from("1.0"));
+        // The command carries the primary's reduced quantity at submission,
+        // matching the cached order asserted below.
+        assert_eq!(command.order_init.quantity, Quantity::from("0.5"));
         assert_eq!(
             algo.cache().order(&client_order_id).unwrap().quantity(),
             Quantity::from("0.5"),
@@ -4697,8 +5219,8 @@ mod tests {
             panic!("Expected exactly one SubmitOrder command");
         };
         assert_eq!(command.client_order_id, client_order_id);
-        // The command embeds the immutable OrderInitialized event; here the
-        // cancellation already restored the cache to 1.0, so the two agree.
+        // The cancellation restored the primary to 1.0 before submission, so
+        // the command carries the full quantity.
         assert_eq!(command.order_init.quantity, Quantity::from("1.0"));
         assert_eq!(
             algo.cache().order(&client_order_id).unwrap().quantity(),
@@ -5386,14 +5908,17 @@ mod tests {
 
         // Reuse most of the restored quantity through a second spawn
         let mut primary = algo.cache().order(&client_order_id).unwrap();
-        let second_order = OrderAny::Market(algo.spawn_market(
-            &mut primary,
-            Quantity::from("0.8"),
-            TimeInForce::Fok,
-            false,
-            None,
-            true,
-        ));
+        let second_order = OrderAny::Market(
+            algo.spawn_market(
+                &mut primary,
+                Quantity::from("0.8"),
+                TimeInForce::Fok,
+                false,
+                None,
+                true,
+            )
+            .unwrap(),
+        );
         algo.core
             .cache_rc()
             .borrow_mut()
@@ -5549,19 +6074,21 @@ mod tests {
     fn test_emulated_spawn_refusal_restores_initialized_primary() {
         let (mut algo, client_order_id, _spawned_order) = setup_pending_spawn();
         let mut primary = algo.cache().order(&client_order_id).unwrap();
-        let spawned = algo.spawn_limit(
-            &mut primary,
-            Quantity::from("0.3"),
-            Price::from("50000.0"),
-            TimeInForce::Gtc,
-            None,
-            false,
-            false,
-            None,
-            Some(TriggerType::BidAsk),
-            None,
-            true,
-        );
+        let spawned = algo
+            .spawn_limit(
+                &mut primary,
+                Quantity::from("0.3"),
+                Price::from("50000.0"),
+                TimeInForce::Gtc,
+                None,
+                false,
+                false,
+                None,
+                Some(TriggerType::BidAsk),
+                None,
+                true,
+            )
+            .unwrap();
         assert_eq!(
             algo.cache().order(&client_order_id).unwrap().quantity(),
             Quantity::from("0.2"),
@@ -5735,26 +6262,30 @@ mod tests {
             cache.add_order(primary.clone(), None, None, false).unwrap();
         }
 
-        let _ = algo.spawn_market(
-            &mut primary,
-            Quantity::from("0.8"),
-            TimeInForce::Fok,
-            false,
-            None,
-            true,
-        );
+        let _ = algo
+            .spawn_market(
+                &mut primary,
+                Quantity::from("0.8"),
+                TimeInForce::Fok,
+                false,
+                None,
+                true,
+            )
+            .unwrap();
 
         assert_eq!(primary.quantity(), Quantity::from("0.2"));
         assert_eq!(primary.leaves_qty(), Quantity::from("0.2"));
 
         // Should panic - spawning 0.5 when only 0.2 leaves_qty remains
-        let _ = algo.spawn_market(
-            &mut primary,
-            Quantity::from("0.5"),
-            TimeInForce::Fok,
-            false,
-            None,
-            true,
-        );
+        let _ = algo
+            .spawn_market(
+                &mut primary,
+                Quantity::from("0.5"),
+                TimeInForce::Fok,
+                false,
+                None,
+                true,
+            )
+            .unwrap();
     }
 }
