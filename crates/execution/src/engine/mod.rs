@@ -26,6 +26,7 @@ pub mod settlement;
 pub mod stubs;
 
 use std::{
+    borrow::Cow,
     cell::{Cell, RefCell, RefMut},
     collections::{HashMap, HashSet},
     fmt::{Debug, Display},
@@ -54,8 +55,7 @@ use nautilus_common::{
     },
     msgbus::{
         self, MStr, MessagingSwitchboard, Pattern, TypedHandler, TypedIntoHandler, get_message_bus,
-        switchboard::{self},
-        typed_handler::ShareableMessageHandler,
+        switchboard, typed_handler::ShareableMessageHandler,
     },
     runner::{
         TradingCommandMessage, capture_trading_cmd, trading_cmd_is_dispatching,
@@ -100,7 +100,8 @@ use crate::{
         check_position_reconciliation, fill_precedes_reconciled_position,
         fill_precedes_snapshot_reconciled_position, generate_external_order_status_events,
         generate_reconciliation_order_events, generate_reconciliation_order_pre_fill_events,
-        generate_reconciliation_order_snapshot_events, reconcile_fill_report as reconcile_fill,
+        generate_reconciliation_order_snapshot_events, preserve_order_amendment,
+        reconcile_fill_report as reconcile_fill,
     },
 };
 
@@ -1127,6 +1128,10 @@ impl ExecutionEngine {
         instrument: Option<&InstrumentAny>,
         is_snapshot: bool,
     ) {
+        let requires_authoritative_fills = self.requires_authoritative_fills(report, Some(order));
+        let current_report = preserve_order_amendment(order, report, requires_authoritative_fills);
+        let report = current_report.as_ref();
+
         if self.order_report_has_missing_fills(report, Some(order)) {
             if order.status() == OrderStatus::Submitted {
                 let ts_now = self.clock.borrow().timestamp_ns();
@@ -1168,6 +1173,14 @@ impl ExecutionEngine {
             return false;
         }
 
+        self.requires_authoritative_fills(report, order)
+    }
+
+    fn requires_authoritative_fills(
+        &self,
+        report: &OrderStatusReport,
+        order: Option<&OrderAny>,
+    ) -> bool {
         let client = order
             .and_then(|order| {
                 self.cache
@@ -1752,6 +1765,15 @@ impl ExecutionEngine {
             }
             return;
         };
+
+        let requires_authoritative_fills =
+            self.requires_authoritative_fills(report, order.as_ref());
+        let current_report = match order.as_ref() {
+            Some(order) => preserve_order_amendment(order, report, requires_authoritative_fills),
+            None => Cow::Borrowed(report),
+        };
+
+        let report = current_report.as_ref();
 
         // Bootstrap the external order with only OrderAccepted; defer fill events to
         // the per-fill loop so real fill metadata is preserved.

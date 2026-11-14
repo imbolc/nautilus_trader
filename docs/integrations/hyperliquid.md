@@ -225,7 +225,7 @@ venue while the narrowed client rejects their cancellation requests and ignores 
 
 When reusing a cache with a narrower scope, set `reconciliation_instrument_ids` to match the
 instruments this node manages. This setting only limits reconciliation checks. Excluded orders retain
-their cached status when absent from scoped reports. With `open_check_open_only=False` or the fallback
+their cached status when absent from scoped reports. In either open-order check mode or the fallback
 single-order query path, the execution manager can repeatedly query out-of-scope orders and consume the
 per-cycle query budget. A generic order-report coverage contract is tracked separately in
 [issue #5569](https://github.com/nautechsystems/nautilus_trader/issues/5569).
@@ -2024,6 +2024,11 @@ separate weights and request limits therefore remain outside this adapter's limi
 | `book_feed`                              | `l2Book`  | Fixed book source: documented `l2Book` snapshots or the web application's compact `l2` feed.         |
 | `update_instruments_interval_mins`       | `60`      | Instrument refresh interval in minutes; `0` disables periodic refresh.                               |
 | `transport_backend`                      | `Sockudo` | WebSocket transport backend.                                                                         |
+
+For `request_instrument` and `request_instruments`, `http_timeout_secs` also bounds the entire
+request, including time waiting for another instrument refresh. Failed refreshes, missing requested
+instruments, timeouts, and client shutdown produce a failed completion with the original request ID.
+Partial metadata loads retain their existing best-effort behavior.
 
 ### Execution client configuration options
 

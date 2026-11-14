@@ -86,8 +86,8 @@ use nautilus_core::{
 use nautilus_model::{
     accounts::{Account, AccountAny},
     data::{
-        Bar, BarType, FundingRateUpdate, GreeksData, IndexPriceUpdate, InstrumentClose,
-        InstrumentStatus, MarkPriceUpdate, QuoteTick, TradeTick, YieldCurve,
+        Bar, BarType, CustomData, DataType, FundingRateUpdate, GreeksData, IndexPriceUpdate,
+        InstrumentClose, InstrumentStatus, MarkPriceUpdate, QuoteTick, TradeTick, YieldCurve,
         option_chain::OptionGreeks,
     },
     enums::{
@@ -107,7 +107,7 @@ use nautilus_model::{
     orders::{Order, OrderAny, OrderError, OrderList},
     position::{Position, PositionReplayEvent},
     types::{
-        Currency, Money, Price, Quantity,
+        Currency, ERROR_PRICE, Money, Price, Quantity,
         fixed::{FIXED_PRECISION, MAX_FLOAT_PRECISION, check_fixed_precision},
         price::PriceRaw,
     },
@@ -147,6 +147,7 @@ pub struct Cache {
     funding_rates: AHashMap<InstrumentId, BoundedVecDeque<FundingRateUpdate>>,
     instrument_statuses: AHashMap<InstrumentId, BoundedVecDeque<InstrumentStatus>>,
     bars: AHashMap<BarType, BoundedVecDeque<Bar>>,
+    custom_data: AHashMap<DataType, BoundedVecDeque<CustomData>>,
     greeks: AHashMap<InstrumentId, GreeksData>,
     option_greeks: AHashMap<InstrumentId, OptionGreeks>,
     yield_curves: AHashMap<String, YieldCurve>,
@@ -187,6 +188,7 @@ impl Debug for Cache {
             .field("instrument_statuses", &self.instrument_statuses)
             .field("instrument_closes", &self.instrument_closes)
             .field("bars", &self.bars)
+            .field("custom_data", &self.custom_data)
             .field("greeks", &self.greeks)
             .field("option_greeks", &self.option_greeks)
             .field("yield_curves", &self.yield_curves)
@@ -261,6 +263,7 @@ impl Cache {
             funding_rates: AHashMap::new(),
             instrument_statuses: AHashMap::new(),
             bars: AHashMap::new(),
+            custom_data: AHashMap::new(),
             greeks: AHashMap::new(),
             option_greeks: AHashMap::new(),
             yield_curves: AHashMap::new(),
@@ -1198,22 +1201,96 @@ impl Cache {
     // Calculate the unrealized profit and loss (PnL) for `position`.
     #[must_use]
     pub fn calculate_unrealized_pnl(&self, position: &Position) -> Option<Money> {
-        let Some(quote) = self.quote(&position.instrument_id) else {
-            log::warn!(
-                "Cannot calculate unrealized PnL for {}, no quotes for {}",
-                position.id,
-                position.instrument_id
-            );
-            return None;
+        let instrument_id = &position.instrument_id;
+        let price_type = match position.side {
+            PositionSide::Long => PriceType::Bid,
+            PositionSide::Short => PriceType::Ask,
+            PositionSide::Flat => return Some(Money::zero(position.settlement_currency)),
         };
 
-        // Use exit price for mark-to-market: longs exit at bid, shorts exit at ask
-        let last = match position.side {
-            PositionSide::Flat => {
-                return Some(Money::zero(position.settlement_currency));
+        let allows_negative_price = self
+            .instrument(instrument_id)
+            .map(Instrument::allows_negative_price)
+            .or(position.allows_negative_price);
+        let allows_non_positive = |default| {
+            !position
+                .instrument_class
+                .divides_notional_by_price(position.is_inverse)
+                && allows_negative_price.unwrap_or(default)
+        };
+
+        let is_valid = |price: &Price, non_positive_allowed| {
+            !price.is_undefined()
+                && !price.is_error()
+                && price.precision != ERROR_PRICE.precision
+                && (price.as_decimal() > Decimal::ZERO || non_positive_allowed)
+        };
+
+        let fallback_is_valid = |price: &Price| {
+            is_valid(
+                price,
+                allows_non_positive(position.instrument_class.allows_negative_price()),
+            )
+        };
+        let quote_price = || {
+            self.quote(instrument_id).and_then(|quote| {
+                let (price, size) = match price_type {
+                    PriceType::Bid => (quote.bid_price, quote.bid_size),
+                    _ => (quote.ask_price, quote.ask_size),
+                };
+
+                // Older positions lack the instrument policy, so retain their quote valuation
+                (is_valid(&price, allows_non_positive(true))
+                    && (price.as_decimal() > Decimal::ZERO || size.is_positive()))
+                .then_some(price)
+            })
+        };
+
+        // Bars closing together rank in the fallback order above, then mid, then the opposite quote
+        // side, then by bar type, so the choice never depends on cache iteration order.
+        let bar_rank = |bar: &Bar| {
+            let bar_price_type = bar.bar_type.spec().price_type;
+            if bar_price_type == price_type {
+                0
+            } else {
+                match bar_price_type {
+                    PriceType::Mark => 1,
+                    PriceType::Last => 2,
+                    PriceType::Mid => 3,
+                    PriceType::Bid | PriceType::Ask => 4,
+                }
             }
-            PositionSide::Long => quote.bid_price,
-            PositionSide::Short => quote.ask_price,
+        };
+
+        // In a backtest `ts_init` is the bar close for open- and close-stamped bars alike
+        let bar_close = || {
+            self.bars
+                .iter()
+                .filter(|(bar_type, _)| bar_type.instrument_id() == *instrument_id)
+                .filter_map(|(_, bars)| bars.front())
+                .filter(|bar| fallback_is_valid(&bar.close))
+                .min_by_key(|bar| (Reverse(bar.ts_init), bar_rank(bar), bar.bar_type))
+                .map(|bar| bar.close)
+        };
+
+        // Use exit price for mark-to-market: longs exit at bid, shorts exit at ask.
+        // When quotes are unavailable, fall back across mark prices, trade ticks, and bars.
+        let Some(last) = quote_price()
+            .or_else(|| {
+                self.price(instrument_id, PriceType::Mark)
+                    .filter(fallback_is_valid)
+            })
+            .or_else(|| {
+                self.price(instrument_id, PriceType::Last)
+                    .filter(fallback_is_valid)
+            })
+            .or_else(bar_close)
+        else {
+            log::warn!(
+                "Cannot calculate unrealized PnL for {}, no quotes, mark prices, trades, or bars for {instrument_id}",
+                position.id,
+            );
+            return None;
         };
 
         position
@@ -2276,6 +2353,9 @@ impl Cache {
         self.instrument_closes.remove(&instrument_id);
         self.greeks.remove(&instrument_id);
         self.option_greeks.remove(&instrument_id);
+        let identifier = instrument_id.to_string();
+        self.custom_data
+            .retain(|data_type, _| data_type.identifier() != Some(identifier.as_str()));
 
         self.bars
             .retain(|bar_type, _| bar_type.instrument_id() != instrument_id);
@@ -2426,6 +2506,7 @@ impl Cache {
         self.greeks.clear();
         self.option_greeks.clear();
         self.yield_curves.clear();
+        self.custom_data.clear();
 
         if self.config.drop_instruments_on_reset {
             #[cfg(feature = "defi")]
@@ -2551,7 +2632,7 @@ impl Cache {
         let mark_prices_deque = self
             .mark_prices
             .entry(mark_price.instrument_id)
-            .or_insert_with(|| BoundedVecDeque::new(self.config.tick_capacity));
+            .or_insert_with(|| BoundedVecDeque::new(self.config.data_capacity));
         mark_prices_deque.push_front(mark_price);
         Ok(())
     }
@@ -2576,7 +2657,7 @@ impl Cache {
         let index_prices_deque = self
             .index_prices
             .entry(index_price.instrument_id)
-            .or_insert_with(|| BoundedVecDeque::new(self.config.tick_capacity));
+            .or_insert_with(|| BoundedVecDeque::new(self.config.data_capacity));
         index_prices_deque.push_front(index_price);
         Ok(())
     }
@@ -2601,7 +2682,7 @@ impl Cache {
         let funding_rates_deque = self
             .funding_rates
             .entry(funding_rate.instrument_id)
-            .or_insert_with(|| BoundedVecDeque::new(self.config.tick_capacity));
+            .or_insert_with(|| BoundedVecDeque::new(self.config.data_capacity));
         funding_rates_deque.push_front(funding_rate);
         Ok(())
     }
@@ -2633,7 +2714,7 @@ impl Cache {
             let funding_rate_deque = self
                 .funding_rates
                 .entry(funding_rate.instrument_id)
-                .or_insert_with(|| BoundedVecDeque::new(self.config.tick_capacity));
+                .or_insert_with(|| BoundedVecDeque::new(self.config.data_capacity));
             funding_rate_deque.push_front(*funding_rate);
         }
         Ok(())
@@ -2656,7 +2737,7 @@ impl Cache {
         let statuses_deque = self
             .instrument_statuses
             .entry(status.instrument_id)
-            .or_insert_with(|| BoundedVecDeque::new(self.config.tick_capacity));
+            .or_insert_with(|| BoundedVecDeque::new(self.config.data_capacity));
         statuses_deque.push_front(status);
         Ok(())
     }
@@ -2706,7 +2787,7 @@ impl Cache {
         let quotes_deque = self
             .quotes
             .entry(quote.instrument_id)
-            .or_insert_with(|| BoundedVecDeque::new(self.config.tick_capacity));
+            .or_insert_with(|| BoundedVecDeque::new(self.config.data_capacity));
         quotes_deque.push_front(quote);
         Ok(())
     }
@@ -2738,7 +2819,7 @@ impl Cache {
             let quotes_deque = self
                 .quotes
                 .entry(quote.instrument_id)
-                .or_insert_with(|| BoundedVecDeque::new(self.config.tick_capacity));
+                .or_insert_with(|| BoundedVecDeque::new(self.config.data_capacity));
             quotes_deque.push_front(*quote);
         }
         Ok(())
@@ -2766,7 +2847,7 @@ impl Cache {
         let trades_deque = self
             .trades
             .entry(trade.instrument_id)
-            .or_insert_with(|| BoundedVecDeque::new(self.config.tick_capacity));
+            .or_insert_with(|| BoundedVecDeque::new(self.config.data_capacity));
         trades_deque.push_front(trade);
         Ok(())
     }
@@ -2798,7 +2879,7 @@ impl Cache {
             let trades_deque = self
                 .trades
                 .entry(trade.instrument_id)
-                .or_insert_with(|| BoundedVecDeque::new(self.config.tick_capacity));
+                .or_insert_with(|| BoundedVecDeque::new(self.config.data_capacity));
             trades_deque.push_front(*trade);
         }
         Ok(())
@@ -2895,6 +2976,21 @@ impl Cache {
             .or_insert_with(|| BoundedVecDeque::new(self.config.bar_capacity));
         insert_bar_historical(bars, bar);
         Ok(())
+    }
+
+    /// Adds custom data as the newest entry in its bounded history.
+    ///
+    /// Each data type topic has its own history, limited by `CacheConfig::data_capacity`.
+    /// This operation updates memory only.
+    pub fn add_custom_data(&mut self, data: CustomData) {
+        if let Some(history) = self.custom_data.get_mut(&data.data_type) {
+            history.push_front(data);
+        } else {
+            let data_type = data.data_type.clone();
+            let mut history = BoundedVecDeque::new(self.config.data_capacity);
+            history.push_front(data);
+            self.custom_data.insert(data_type, history);
+        }
     }
 
     /// Adds the `greeks` data to the cache.
@@ -4116,8 +4212,7 @@ impl Cache {
         // Retain an account taken out by the caller even if a referenced currency fails validation
         let currencies: Vec<Currency> = account
             .last_event()
-            .map(|state| Self::state_currencies(&state).collect())
-            .unwrap_or_default();
+            .map_or_default(|state| Self::state_currencies(&state).collect());
         self.cache_account_owned(account);
 
         for currency in currencies {
@@ -7050,6 +7145,16 @@ impl Cache {
             .map(|bars| bars.iter().copied().collect())
     }
 
+    /// Returns custom data for the `data_type` in reverse insertion order.
+    ///
+    /// Entries are not sorted by timestamp. The history is empty when no data is cached.
+    #[must_use]
+    pub fn custom_data_history(&self, data_type: &DataType) -> Vec<CustomData> {
+        self.custom_data
+            .get(data_type)
+            .map_or_default(|history| history.iter().cloned().collect())
+    }
+
     /// Returns the current order book for the `instrument_id`, or `None` if absent.
     ///
     /// The cache holds the current book state, not a history of book updates.
@@ -7249,6 +7354,23 @@ impl Cache {
     #[must_use]
     pub fn bar_at_index(&self, bar_type: &BarType, index: usize) -> Option<&Bar> {
         self.bars.get(bar_type).and_then(|bars| bars.get(index))
+    }
+
+    /// Returns the most recently added custom data for the `data_type`, or `None` if absent.
+    #[must_use]
+    pub fn custom_data(&self, data_type: &DataType) -> Option<&CustomData> {
+        self.custom_data_at_index(data_type, 0)
+    }
+
+    /// Returns custom data at `index` for the `data_type`.
+    ///
+    /// Index 0 is the most recently added item. Entries are not sorted by timestamp.
+    /// Returns `None` when no item exists at the index.
+    #[must_use]
+    pub fn custom_data_at_index(&self, data_type: &DataType, index: usize) -> Option<&CustomData> {
+        self.custom_data
+            .get(data_type)
+            .and_then(|history| history.get(index))
     }
 
     /// Gets the order book update count for the `instrument_id`.
